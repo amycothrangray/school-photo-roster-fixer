@@ -1876,7 +1876,7 @@ const LABEL_META_FONT = "'Mulish','Nunito Sans','Nunito',-apple-system,'Segoe UI
    is fixed small, and only shrinks for a long teacher name. */
 const LABEL_TYPE = {
   nameMax: 28, nameMin: 7.5,
-  metaMax: 9, metaMin: 5.8,
+  metaMax: 12, metaMin: 7,
   metaTrack: 0.1,              /* letter-spacing, em -- widens the caps line */
   /* Fit to a hair under the die-cut rather than exactly to it. Hinting and
      sub-pixel rounding put the painted glyphs a fraction wider than the

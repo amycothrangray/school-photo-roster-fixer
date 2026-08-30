@@ -301,7 +301,9 @@ function labelTests() {
   eq("stats: labels", st.labels, 35);
   eq("stats: blanks", st.blanks, 3 * 30 - 35);
 
-  eq("the shipped maximum is what the app preloads", RF.LABEL_TYPE.nameMax, 28);
+  eq("the shipped name maximum is what the app preloads", RF.LABEL_TYPE.nameMax, 28);
+  eq("...and the class line is set to be read across a room", RF.LABEL_TYPE.metaMax, 12);
+  ok("the class line never shrinks below legible", RF.LABEL_TYPE.metaMin >= 7, RF.LABEL_TYPE.metaMin);
 
   /* Names are fitted to slightly less than the die-cut, because a name that
      measures as an exact fit prints with its last letter shaved off. */

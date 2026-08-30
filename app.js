@@ -666,7 +666,7 @@ function loadLabelFonts() {
     "&family=Mulish:wght@600;700&display=swap";
   document.head.appendChild(link);
 
-  const want = ['600 28px "Lora"', '700 9px "Mulish"'];
+  const want = ['600 28px "Lora"', '700 12px "Mulish"'];
   const load = document.fonts
     ? Promise.all(want.map(f => document.fonts.load(f))).then(() => document.fonts.ready)
     : Promise.resolve();
