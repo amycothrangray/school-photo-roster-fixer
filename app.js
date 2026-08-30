@@ -497,6 +497,7 @@ function renderDownload() {
       "Sending the CSV straight to GotPhoto avoids the question entirely.</div>"
     : "";
 
+  renderLabelSummary();
   renderAudit();
 }
 
@@ -647,6 +648,88 @@ function renderAudit() {
     (r.students.length > 400 ? '<div class="hint">Showing the first 400.</div>' : "") + "</details>";
 }
 
+/* ----------------------------------------------------- Avery 5160 labels
+
+   The label sheet needs Lora and Mulish, which the app itself does not use,
+   so they are fetched the first time labels are asked for rather than on
+   every page load. The names have to be *measured* in those faces to be set
+   as large as they will fit, so the wait is not optional -- measuring in a
+   fallback face would size every label to the wrong width. */
+
+let labelFontsReady = null;
+
+function loadLabelFonts() {
+  if (labelFontsReady) return labelFontsReady;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = "https://fonts.googleapis.com/css2?family=Lora:wght@500;600" +
+    "&family=Mulish:wght@600;700&display=swap";
+  document.head.appendChild(link);
+
+  const want = ['600 28px "Lora"', '700 9px "Mulish"'];
+  const load = document.fonts
+    ? Promise.all(want.map(f => document.fonts.load(f))).then(() => document.fonts.ready)
+    : Promise.resolve();
+  /* Never hang on a slow or blocked font host: fall through after 6s and let
+     the fallback metrics size the labels approximately. Nothing overflows if
+     they are a little off -- the name is clipped to the label, not spilled. */
+  labelFontsReady = Promise.race([load, new Promise(r => setTimeout(r, 6000))]);
+  return labelFontsReady;
+}
+
+/* One canvas, reused. measureText is linear in font size, which is what lets
+   lib.js compute a fitted size from a single measurement per name. */
+let measureCtx = null;
+function measureText(text, px, family) {
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  measureCtx.font = "600 " + px + "px " + family;
+  return measureCtx.measureText(text).width;
+}
+
+function renderLabelSummary() {
+  const classes = RF.labelClasses(S.result.students);
+  const stats = RF.labelStats(RF.labelPages(S.result.students));
+  $("labelinfo").innerHTML =
+    '<div class="dl-lead">' + plural(stats.classes, "class", "classes") + " &middot; " +
+    plural(stats.sheets, "sheet") + " of Avery 5160 &middot; " + plural(stats.labels, "label") +
+    (stats.blanks ? " &middot; " + stats.blanks + " blank" : "") +
+    ". Each class starts on a fresh sheet, so part-full sheets are expected.</div>" +
+    '<details><summary>The classes it found<span class="c q">' + classes.length + "</span></summary>" +
+    '<div class="list">' + classes.map(c =>
+      '<div class="li"><span class="who">' + esc(c.title) + "</span>" +
+      '<span class="where">' + plural(c.students.length, "student") + " &middot; " +
+      plural(Math.ceil(c.students.length / 30), "sheet") + "</span></div>").join("") +
+    "</div></details>";
+}
+
+/* Opens the sheet in a new tab to print from. If the browser blocks the
+   pop-up, the same document is saved to disk instead -- it is self-contained,
+   so opening the file and pressing print gets to the same place. */
+async function openLabels(btn) {
+  const win = window.open("", "_blank");   /* claimed inside the click, or it is blocked */
+  return withButton(btn, "Building...", async () => {
+    await loadLabelFonts();
+    const html = RF.buildLabelHTML(S.result.students, {
+      measure: measureText,
+      title: RF.sheetName(fileBase())
+    });
+    const stats = RF.labelStats(RF.labelPages(S.result.students));
+    if (win && !win.closed) {
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      note("Label sheet open in a new tab &mdash; " + plural(stats.sheets, "sheet") + " for " +
+        plural(stats.classes, "class", "classes") + ". Print it with <b>Margins: None</b> and " +
+        "<b>Scale: 100%</b> onto Avery 5160.");
+    } else {
+      const name = RF.labelFileName(fileBase());
+      saveText(html, name, "text/html");
+      note("Your browser blocked the new tab, so the labels were saved as <b>" + esc(name) +
+        "</b> instead. Open it and press print.");
+    }
+  });
+}
+
 /* ---------------------------------------------------------- sidebar */
 
 function renderSidebar() {
@@ -692,6 +775,7 @@ $("dl-book").addEventListener("click", function () { downloadWorkbook(this); });
 $("dl-review").addEventListener("click", () => downloadSheetCSV("review"));
 $("dl-report").addEventListener("click", () => downloadSheetCSV("report"));
 $("dl-trace").addEventListener("click", () => downloadSheetCSV("trace"));
+$("dl-labels").addEventListener("click", function () { openLabels(this); });
 document.querySelectorAll(".step").forEach(el => el.addEventListener("click", () => {
   const s = parseInt(el.dataset.step, 10);
   if (S.book && s <= S.step) $("card" + s).scrollIntoView({ block: "start" });

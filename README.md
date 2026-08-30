@@ -98,6 +98,38 @@ CSV, so the CSV of a sheet and the Excel tab of that sheet cannot disagree.
 
 ---
 
+## Name labels
+
+The download screen also prints a sheet of **Avery 5160** name labels for every
+student — 30 to a page, three across and ten down.
+
+| | |
+| --- | --- |
+| Name | the child's full name in **Lora**, set as large as it will fit on one line |
+| Under it | a hairline rule with a small diamond |
+| Below that | `GRADE 3 · MRS. BROWN` in **Mulish** small caps |
+
+**Every class starts on a new sheet.** A class of 31 takes two sheets and the
+rest of the second one stays blank; the next class never begins halfway down a
+page you have already peeled. That is the point — you pull one classroom off
+the printer at a time — so part-full sheets are expected, and the app tells you
+how many sheets and how many blanks before you print.
+
+A classroom is one grade and one teacher, matched on the same key the engine
+uses to spot two spellings of one name, so a roster carrying both `Mrs. Brown`
+and `BROWN, SUSAN` gives you one stack rather than two half-empty ones. Names
+are sorted by last name inside each class.
+
+The button opens a print preview in a new tab. **Set Margins to None and Scale
+to 100%**, and turn off headers and footers — anything else moves the grid off
+the die-cut. The preview shows the label outlines on screen so you can check
+the alignment before committing a sheet; they do not print.
+
+If your browser blocks the new tab, the same sheet is saved as an `.html` file
+instead — open it and press print.
+
+---
+
 ## No Excel on the computer
 
 Nothing here needs it. The CSV is the main output, and it goes straight into
@@ -211,7 +243,7 @@ Emergency contacts are **not** treated as buyers unless you say they are.
 | | |
 | --- | --- |
 | `index.html` | the page and all of its styling, in the ClassPhoto house style |
-| `lib.js` | the whole cleanup engine — no DOM, no globals, testable on its own |
+| `lib.js` | the cleanup engine and the label sheet — no DOM, no globals, testable on its own |
 | `app.js` | reads the file, draws the screen, feeds your choices back to the engine |
 | `test/` | the rules that are not allowed to break |
 

@@ -166,6 +166,7 @@ RF.buildWorkbook(ExcelJS, r, { trace: true }).then(async buf => {
   ok("report sheet has rows", back.getWorksheet("CLEANUP REPORT").rowCount > 10);
 
   await csvOutput(r);
+  labelTests();
 
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
@@ -240,6 +241,119 @@ async function csvOutput(r) {
   const oneIds = [];
   one.getWorksheet("GOTPHOTO READY").eachRow((row, n) => { if (n > 1) oneIds.push(row.getCell(5).value); });
   ok("...and its IDs are still text", oneIds.indexOf("0018472") >= 0, oneIds.slice(0, 3));
+}
+
+/* ------------------------------------------------- Avery 5160 name labels
+
+   The two rules that matter physically: 30 to a sheet, and a class never
+   shares a sheet with another class. Everything else is about the labels
+   fitting inside the die-cut. */
+function labelTests() {
+  group("labels");
+
+  const kid = (first, last, grade, teacher) => ({ first, last, grade, teacher, id: "", contacts: [] });
+  const many = (n, grade, teacher) => Array.from({ length: n },
+    (_, i) => kid("Kid" + String(i).padStart(2, "0"), "Last" + String(i).padStart(2, "0"), grade, teacher));
+
+  /* --- grouping --- */
+  const roster = [
+    kid("Emma", "Smith", "3", "Mrs. Brown"),
+    kid("Liam", "Adams", "3", "Susan Brown"),       // same classroom, spelled differently
+    kid("Noah", "Kim", "3", "Mr. Jones"),
+    kid("Ava", "Young", "K", "Mrs. Alvarez")
+  ];
+  const cls = RF.labelClasses(roster);
+  eq("one class per grade+teacher", cls.length, 3);
+  eq("two spellings of one teacher are one class",
+    cls.filter(c => c.grade === "3" && /brown/i.test(c.teacher)).length, 1);
+  eq("...holding both children",
+    cls.find(c => /brown/i.test(c.teacher)).students.map(s => s.first), ["Liam", "Emma"]);
+  eq("sorted by last name inside a class",
+    cls.find(c => /brown/i.test(c.teacher)).students.map(s => s.last), ["Adams", "Smith"]);
+  eq("classes run in grade order", cls.map(c => c.grade), ["K", "3", "3"]);
+  eq("class title", RF.classTitle("3", "Mrs. Brown"), "Grade 3 · Mrs. Brown");
+  eq("kindergarten is not 'Grade K'", RF.classTitle("K", "Mrs. Alvarez"), "K · Mrs. Alvarez");
+  eq("no class at all", RF.classTitle("", ""), "No class listed");
+
+  /* --- pagination: the rule the whole feature turns on --- */
+  const pages = RF.labelPages(roster);
+  eq("one sheet per class, none shared", pages.length, 3);
+  ok("every sheet holds exactly 30 cells", pages.every(p => p.cells.length === 30));
+  ok("no sheet mixes two classes", pages.every(p =>
+    p.cells.filter(Boolean).every(s => RF.classTitle(s.grade, p.cls.teacher) || true) &&
+    new Set(p.cells.filter(Boolean).map(s => s.grade)).size <= 1));
+  eq("short class is padded with blanks", pages[0].cells.filter(x => x === null).length, 29);
+
+  /* --- a class that overflows a sheet --- */
+  const big = RF.labelPages(many(31, "5", "Mr. Reyes").concat(many(4, "6", "Ms. Diaz")));
+  eq("31 students take two sheets, 4 take one", big.length, 3);
+  eq("first sheet is full", big[0].cells.filter(Boolean).length, 30);
+  eq("...and the 31st is alone on the second", big[1].cells.filter(Boolean).length, 1);
+  eq("the next class still starts fresh", big[2].cells.filter(Boolean).length, 4);
+  ok("the overflow sheet is the same class", big[0].cls === big[1].cls);
+  ok("the next class is a different one", big[1].cls !== big[2].cls);
+  eq("exactly 60 to two sheets", RF.labelPages(many(60, "1", "A")).length, 2);
+  eq("exactly 30 fits one sheet", RF.labelPages(many(30, "1", "A")).length, 1);
+
+  const st = RF.labelStats(big);
+  eq("stats: classes", st.classes, 2);
+  eq("stats: sheets", st.sheets, 3);
+  eq("stats: labels", st.labels, 35);
+  eq("stats: blanks", st.blanks, 3 * 30 - 35);
+
+  eq("the shipped maximum is what the app preloads", RF.LABEL_TYPE.nameMax, 28);
+
+  /* Names are fitted to slightly less than the die-cut, because a name that
+     measures as an exact fit prints with its last letter shaved off. */
+  ok("names are fitted inside the die-cut, not to it",
+    RF.LABEL_TYPE.slack > 0.9 && RF.LABEL_TYPE.slack < 1, RF.LABEL_TYPE.slack);
+
+  /* --- fitting the name to the label --- */
+  const halfEm = (t, px) => t.length * px * 0.5;     /* a stand-in for the canvas */
+  const avail = (2.625 - 0.2) * 96;                  /* 232.8px inside the die-cut */
+  eq("a short name takes the maximum size", RF.fitPx("Ava Kim", avail, 21, 7.5, halfEm), 21);
+  const long = RF.fitPx("Bartholomew Fitzgerald-Wintersmith", avail, 21, 7.5, halfEm);
+  ok("a long name shrinks", long < 21 && long > 7.5, long);
+  ok("...to exactly what fits", Math.abs(halfEm("Bartholomew Fitzgerald-Wintersmith", long) - avail) < 0.5,
+    halfEm("Bartholomew Fitzgerald-Wintersmith", long));
+  eq("an absurd name stops at the floor",
+    RF.fitPx("x".repeat(400), avail, 21, 7.5, halfEm), 7.5);
+  eq("empty text does not divide by zero", RF.fitPx("", avail, 21, 7.5, halfEm), 21);
+  eq("a broken measurer falls back to the maximum", RF.fitPx("Ava", avail, 21, 7.5, () => 0), 21);
+  const wide = "GRADE 3 · MRS. VANDERWATERSTONE";
+  ok("letter-spacing is paid for",
+    RF.fitPx(wide, avail, 21, 7.5, halfEm, null, 0.1) < RF.fitPx(wide, avail, 21, 7.5, halfEm),
+    [RF.fitPx(wide, avail, 21, 7.5, halfEm, null, 0.1), RF.fitPx(wide, avail, 21, 7.5, halfEm)]);
+
+  /* --- the printed document --- */
+  const html = RF.buildLabelHTML(roster, { measure: halfEm, title: "Oakhaven Roster" });
+  eq("one <section> per sheet", (html.match(/<section class="sheet"/g) || []).length, 3);
+  eq("one label div per cell", (html.match(/class="lbl /g) || []).length, 90);
+  ok("page box is letter", html.indexOf("@page{size:8.5in 11in;margin:0}") >= 0);
+  ok("label is 2.625in x 1in", html.indexOf("width:2.625in;height:1in") >= 0);
+  ["left:0.1875in", "left:2.9375in", "left:5.6875in"].forEach((c, i) =>
+    ok("column " + i + " at " + c, html.indexOf(c) >= 0));
+  ["top:0.5in", "top:4.5in", "top:9.5in"].forEach(r =>
+    ok("row at " + r, html.indexOf(r) >= 0));
+  ok("Lora sets the name", html.indexOf("font-family:'Lora'") >= 0);
+  ok("Mulish sets the class line", html.indexOf("'Mulish'") >= 0);
+  ok("both faces are fetched", /family=Lora[^"]*family=Mulish/.test(html));
+  ok("each sheet breaks to a new page", html.indexOf("page-break-after:always") >= 0);
+  ok("...except the last, which would print blank",
+    html.indexOf(".sheet:last-child{break-after:auto;page-break-after:auto}") >= 0);
+  ok("the class line is upper case", html.indexOf("GRADE 3 · MRS. BROWN") >= 0);
+  ok("the name is not", html.indexOf(">Emma Smith<") >= 0);
+  ok("the rule is drawn", html.indexOf('<div class="rule"></div>') >= 0);
+  ok("colours survive the print dialog", html.indexOf("print-color-adjust:exact") >= 0);
+  ok("the sheet carries no script of its own", html.indexOf("<script") < 0);
+
+  /* A name is data from a spreadsheet, so it gets escaped like any other. */
+  const nasty = RF.buildLabelHTML([kid('Ann<img src=x onerror="alert(1)">', "O'Hara & Sons", "1", "A")],
+    { measure: halfEm });
+  ok("angle brackets in a name are escaped", nasty.indexOf("<img") < 0);
+  ok("ampersands too", nasty.indexOf("O&#39;Hara &amp; Sons") >= 0);
+
+  eq("label file name", RF.labelFileName("Oakhaven Roster.xlsx"), "Oakhaven Roster - LABELS.html");
 }
 
 /* A deliberately independent RFC 4180 reader, so the test does not check the

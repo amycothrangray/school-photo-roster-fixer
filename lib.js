@@ -1843,6 +1843,235 @@ function buildWorkbook(ExcelJS, result, opts) {
   return wb.xlsx.writeBuffer();
 }
 
+/* ============================================== Avery 5160 name labels
+
+   A sheet of 30 name labels per class, laid out at the exact dimensions
+   Avery prints the 5160 die-cut at. Every measurement below is in inches
+   because that is what the sheet in the printer is, and CSS speaks inches;
+   nothing here is a pixel guess that happens to look right on one screen.
+
+        3 across, 10 down          label   2.625in x 1in
+        page 8.5in x 11in          gutter  0.125in across, none down
+        margins  0.5in top and bottom, 0.1875in left and right
+
+   0.1875 + 3(2.625) + 2(0.125) + 0.1875 = 8.5, and 0.5 + 10(1) + 0.5 = 11,
+   so the grid fills the page exactly and any drift is the print dialog
+   scaling the page, not this file. */
+
+const AVERY_5160 = {
+  id: "5160", name: "Avery 5160",
+  pageW: 8.5, pageH: 11,
+  cols: 3, rows: 10,
+  labelW: 2.625, labelH: 1,
+  marginTop: 0.5, marginLeft: 0.1875,
+  pitchX: 2.75, pitchY: 1,
+  padX: 0.1, padY: 0.05
+};
+
+const LABEL_NAME_FONT = "'Lora',Georgia,'Times New Roman',serif";
+const LABEL_META_FONT = "'Mulish','Nunito Sans','Nunito',-apple-system,'Segoe UI',sans-serif";
+
+/* Type sizes in CSS px (96 to the inch). The name is set as large as it will
+   go on one line and shrinks only as far as it has to; the class line under it
+   is fixed small, and only shrinks for a long teacher name. */
+const LABEL_TYPE = {
+  nameMax: 28, nameMin: 7.5,
+  metaMax: 9, metaMin: 5.8,
+  metaTrack: 0.1,              /* letter-spacing, em -- widens the caps line */
+  /* Fit to a hair under the die-cut rather than exactly to it. Hinting and
+     sub-pixel rounding put the painted glyphs a fraction wider than the
+     measured advance, and a name that measures as an exact fit is the one
+     that comes out of the printer missing its last letter. */
+  slack: 0.97
+};
+
+const DPI = 96;
+const round4 = n => Math.round(n * 10000) / 10000;
+const escHTML = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/* ------------------------------------------------------------- the classes
+
+   One classroom is one grade and one teacher. Teachers are grouped on the
+   same key the engine uses to notice two spellings of one name, so a roster
+   carrying both "Mrs. Brown" and "BROWN, SUSAN" produces one stack of labels
+   rather than two half-empty ones. The spelling printed is whichever the
+   roster uses most. */
+function labelClasses(students) {
+  const map = new Map();
+  (students || []).forEach(s => {
+    const tk = teacherKey(s.teacher);
+    const k = (s.grade || "") + " " + (tk || looseKey(s.teacher));
+    let g = map.get(k);
+    if (!g) { g = { grade: s.grade || "", key: k, spellings: new Map(), students: [] }; map.set(k, g); }
+    if (s.teacher) g.spellings.set(s.teacher, (g.spellings.get(s.teacher) || 0) + 1);
+    g.students.push(s);
+  });
+
+  const byName = (a, b) =>
+    String(a.last || "").localeCompare(String(b.last || ""), undefined, { sensitivity: "base" }) ||
+    String(a.first || "").localeCompare(String(b.first || ""), undefined, { sensitivity: "base" });
+
+  const out = Array.from(map.values());
+  out.forEach(g => {
+    g.teacher = Array.from(g.spellings.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(x => x[0])[0] || "";
+    g.students.sort(byName);
+    g.title = classTitle(g.grade, g.teacher);
+    delete g.spellings;
+  });
+  out.sort((a, b) => gradeRank(a.grade) - gradeRank(b.grade) ||
+    String(a.grade).localeCompare(String(b.grade)) ||
+    String(a.teacher).localeCompare(String(b.teacher)));
+  return out;
+}
+
+function classTitle(grade, teacher) {
+  const g = grade ? (/^\d+$/.test(grade) ? "Grade " + grade : grade) : "";
+  return [g, teacher].filter(Boolean).join(" · ") || "No class listed";
+}
+
+/* --------------------------------------------------------------- the pages
+
+   A class never shares a sheet with another class: you peel one class off the
+   printer at a time. A class of 31 takes two sheets, and the leftovers on the
+   last sheet stay blank. */
+function labelPages(students, spec) {
+  spec = spec || AVERY_5160;
+  const per = spec.cols * spec.rows;
+  const pages = [];
+  labelClasses(students).forEach(cls => {
+    const sheets = Math.max(1, Math.ceil(cls.students.length / per));
+    for (let i = 0; i < sheets; i++) {
+      const cells = cls.students.slice(i * per, (i + 1) * per);
+      while (cells.length < per) cells.push(null);
+      pages.push({ cls: cls, cells: cells, sheet: i + 1, sheets: sheets });
+    }
+  });
+  return pages;
+}
+
+function labelStats(pages, spec) {
+  spec = spec || AVERY_5160;
+  const per = spec.cols * spec.rows;
+  const labels = pages.reduce((n, p) => n + p.cells.filter(Boolean).length, 0);
+  return {
+    classes: new Set(pages.map(p => p.cls)).size,
+    sheets: pages.length, labels: labels,
+    blanks: pages.length * per - labels
+  };
+}
+
+/* --------------------------------------------------------------- fitting
+
+   Text width is linear in font size, so one measurement at a reference size
+   gives the size that exactly fills the space -- no binary search, no reflow
+   per label. `measure` is handed in (a canvas in the browser, a stub in the
+   tests) so this file still touches no DOM. */
+function fitPx(text, availPx, maxPx, minPx, measure, family, trackEm) {
+  if (!text) return maxPx;
+  const ref = 100;
+  let w = measure(text, ref, family);
+  if (trackEm) w += text.length * trackEm * ref;
+  if (!w || !isFinite(w) || w <= 0) return maxPx;
+  return Math.max(minPx, Math.min(maxPx, round4(availPx / w * ref)));
+}
+
+const labelName = s => [s.first, s.last].filter(Boolean).join(" ").trim();
+const labelMeta = cls => cls.title.toUpperCase();
+
+/* --------------------------------------------------------- the print sheet
+
+   A standalone HTML document: open it and press print. It carries no script
+   of its own, because the app's own Content-Security-Policy forbids inline
+   script and this window inherits it -- so every size is computed here and
+   written as an inline style attribute, which the policy does allow. */
+function buildLabelHTML(students, opts) {
+  opts = opts || {};
+  const spec = opts.spec || AVERY_5160;
+  const measure = opts.measure || (t => t.length * 50);
+  const T = opts.type || LABEL_TYPE;
+  const pages = labelPages(students, spec);
+  const stats = labelStats(pages, spec);
+  const availPx = (spec.labelW - 2 * spec.padX) * DPI * (T.slack || 1);
+
+  let grid = "";
+  for (let c = 0; c < spec.cols; c++) {
+    grid += ".c" + c + "{left:" + round4(spec.marginLeft + c * spec.pitchX) + "in}";
+  }
+  for (let r = 0; r < spec.rows; r++) {
+    grid += ".r" + r + "{top:" + round4(spec.marginTop + r * spec.pitchY) + "in}";
+  }
+
+  const body = pages.map(p => {
+    const cells = p.cells.map((s, i) => {
+      const pos = " c" + (i % spec.cols) + " r" + Math.floor(i / spec.cols);
+      if (!s) return '<div class="lbl' + pos + '"></div>';
+      const nm = labelName(s) || "—";
+      const meta = labelMeta(p.cls);
+      const nmPx = fitPx(nm, availPx, T.nameMax, T.nameMin, measure, LABEL_NAME_FONT);
+      const mtPx = fitPx(meta, availPx, T.metaMax, T.metaMin, measure, LABEL_META_FONT, T.metaTrack);
+      return '<div class="lbl' + pos + '"><div class="in">' +
+        '<div class="nm" style="font-size:' + nmPx + 'px">' + escHTML(nm) + "</div>" +
+        '<div class="rule"></div>' +
+        '<div class="cls" style="font-size:' + mtPx + 'px">' + escHTML(meta) + "</div>" +
+        "</div></div>";
+    }).join("");
+    return '<section class="sheet" aria-label="' + escHTML(p.cls.title) + '">' + cells + "</section>";
+  }).join("\n");
+
+  const heading = stats.classes + (stats.classes === 1 ? " class" : " classes") + " · " +
+    stats.sheets + (stats.sheets === 1 ? " sheet" : " sheets") + " · " +
+    stats.labels + (stats.labels === 1 ? " label" : " labels") +
+    (stats.blanks ? " · " + stats.blanks + " blank" : "");
+
+  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8">\n' +
+    "<title>" + escHTML(opts.title || "Name labels") + " — " + spec.name + "</title>\n" +
+    '<link rel="preconnect" href="https://fonts.googleapis.com">\n' +
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n' +
+    '<link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600&' +
+    'family=Mulish:wght@600;700&display=swap" rel="stylesheet">\n<style>\n' +
+    "@page{size:" + spec.pageW + "in " + spec.pageH + "in;margin:0}\n" +
+    "*{margin:0;padding:0;box-sizing:border-box}\n" +
+    "body{background:#e2e8f0;font-family:" + LABEL_META_FONT + ";" +
+      "-webkit-print-color-adjust:exact;print-color-adjust:exact}\n" +
+    ".bar{background:#0f172a;color:#fff;padding:14px 18px;" +
+      "font-size:13px;line-height:1.55;text-align:center}\n" +
+    ".bar b{color:#93c5fd}\n" +
+    ".bar .t{font-weight:700;font-size:15px;color:#fff;display:block;margin-bottom:2px}\n" +
+    /* The sheet is a hair under the page so a rounded-up fraction of a pixel
+       cannot spill onto a blank second page. The last label row ends at
+       9.5+1=10.5in, well inside it, so nothing is lost. */
+    ".sheet{position:relative;width:" + spec.pageW + "in;height:" + round4(spec.pageH - 0.1) + "in;" +
+      "background:#fff;margin:22px auto;box-shadow:0 2px 14px rgba(15,23,42,.22);overflow:hidden}\n" +
+    ".lbl{position:absolute;width:" + spec.labelW + "in;height:" + spec.labelH + "in;" +
+      "display:flex;align-items:center;justify-content:center;overflow:hidden}\n" +
+    grid + "\n" +
+    ".in{width:100%;padding:" + spec.padY + "in " + spec.padX + "in;text-align:center}\n" +
+    ".nm{font-family:" + LABEL_NAME_FONT + ";font-weight:600;color:#0f172a;" +
+      "line-height:1.15;white-space:nowrap;overflow:hidden}\n" +
+    ".rule{position:relative;width:.95in;height:1px;background:#cbd5e1;margin:.045in auto .04in}\n" +
+    ".rule::before{content:'';position:absolute;left:50%;top:50%;width:11px;height:5px;" +
+      "transform:translate(-50%,-50%);background:#fff}\n" +
+    ".rule::after{content:'';position:absolute;left:50%;top:50%;width:3.4px;height:3.4px;" +
+      "transform:translate(-50%,-50%) rotate(45deg);background:#94a3b8}\n" +
+    ".cls{font-family:" + LABEL_META_FONT + ";font-weight:700;color:#475569;" +
+      "letter-spacing:" + T.metaTrack + "em;line-height:1.2;white-space:nowrap;overflow:hidden}\n" +
+    "@media screen{.lbl{outline:1px dashed #e5e9ef;outline-offset:-1px}}\n" +
+    "@media print{body{background:#fff}.bar{display:none}\n" +
+    "  .sheet{margin:0;box-shadow:none;break-after:page;page-break-after:always}\n" +
+    "  .sheet:last-child{break-after:auto;page-break-after:auto}\n" +
+    "  .lbl{outline:none}}\n" +
+    "</style>\n</head>\n<body>\n" +
+    '<div class="bar"><span class="t">' + escHTML(heading) + "</span>" +
+    "Press <b>⌘P</b> or <b>Ctrl+P</b> — set <b>Margins: None</b> and <b>Scale: 100%</b>, " +
+    "and turn headers and footers off. Load " + escHTML(spec.name) + " sheets.</div>\n" +
+    body + "\n</body>\n</html>\n";
+}
+
+const labelFileName = file => sheetName(file) + " - LABELS.html";
+
 /* ================================================================= exports */
 
 return {
@@ -1852,6 +2081,8 @@ return {
   buildWorkbook, buildReadyWorkbook, outputColumns, outputFileName, readyFileName, csvFileName,
   readyTable, reviewTable, reportTable, traceTable, toCSV, toTSV, leadingZeroValues,
   nameLikeness, editDistance, mergeContacts,
+  AVERY_5160, LABEL_TYPE, LABEL_NAME_FONT, LABEL_META_FONT,
+  labelClasses, labelPages, labelStats, buildLabelHTML, labelFileName, fitPx, classTitle, sheetName,
   colLetter, fieldLabel, FIELD_LABEL, F, PARENT_FIELDS, GRADE_ORDER, ISSUE_LABEL, SEVERITY_LABEL
 };
 });
