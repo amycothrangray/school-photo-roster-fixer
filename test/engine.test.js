@@ -165,9 +165,104 @@ RF.buildWorkbook(ExcelJS, r, { trace: true }).then(async buf => {
   ok("review sheet has rows", back.getWorksheet("NEEDS REVIEW").rowCount > 1);
   ok("report sheet has rows", back.getWorksheet("CLEANUP REPORT").rowCount > 10);
 
+  await csvOutput(r);
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 });
+
+/* --------------------------------------------- the CSV that GotPhoto reads
+
+   The workbook has four tabs and GotPhoto will not take a file with more than
+   one. These are the rules for the single-tab CSV that goes in its place. */
+async function csvOutput(r) {
+  group("csv");
+
+  const ready = RF.readyTable(r);
+  const csv = RF.toCSV(ready);
+  const lines = csv.split("\r\n");
+
+  eq("csv header is the export header", lines[0].split(",").slice(0, 5),
+    ["Student First Name", "Student Last Name", "Grade", "Teacher", "Student ID"]);
+  eq("one line per student, plus the header", lines.length - 1, r.stats.students);
+  eq("csv file name", RF.readyFileName("Oakhaven Roster.xlsx"), "Oakhaven Roster - GOTPHOTO READY.csv");
+  eq("csv file name, xlsx flavour", RF.readyFileName("Oakhaven Roster.xlsx", "xlsx"),
+    "Oakhaven Roster - GOTPHOTO READY.xlsx");
+
+  /* The whole point of the tool: 0018472 must survive as text, and it must not
+     arrive at GotPhoto wearing an apostrophe or an ="..." wrapper. */
+  ok("leading zeros survive as plain text", /(^|,)0018472(,|$)/m.test(csv), lines[1]);
+  ok("no apostrophe armour", csv.indexOf("'0018472") < 0);
+  ok("no formula armour", csv.indexOf('="') < 0);
+
+  /* RFC 4180 quoting. */
+  eq("plain value", RF.toCSV({ columns: null, rows: [["Smith"]] }), "Smith");
+  eq("comma is quoted", RF.toCSV({ columns: null, rows: [["Smith, Emma"]] }), '"Smith, Emma"');
+  eq("quote is doubled", RF.toCSV({ columns: null, rows: [['He said "hi"']] }), '"He said ""hi"""');
+  eq("newline is quoted", RF.toCSV({ columns: null, rows: [["a\nb"]] }), '"a\nb"');
+  eq("padding is preserved", RF.toCSV({ columns: null, rows: [[" x "]] }), '" x "');
+  eq("empty stays empty", RF.toCSV({ columns: null, rows: [["", "a"]] }), ",a");
+  eq("null is not the word null", RF.toCSV({ columns: null, rows: [[null, undefined]] }), ",");
+
+  /* Every column is present on every line, or GotPhoto reads the wrong field. */
+  const width = ready.columns.length;
+  const parsed = parseCSVBack(csv);
+  ok("every row has every column", parsed.every(row => row.length === width),
+    parsed.map(row => row.length).filter(n => n !== width).slice(0, 3));
+  eq("round-trips back to the same table", parsed.slice(1), ready.rows);
+
+  /* The clipboard flavour, for pasting into a blank Google Sheet. */
+  const tsv = RF.toTSV(ready);
+  eq("tsv has the same number of lines", tsv.split("\n").length, r.stats.students + 1);
+  eq("tsv splits into the same number of cells", tsv.split("\n")[0].split("\t").length, width);
+  ok("tsv carries no stray tabs or line breaks inside a cell",
+    RF.toTSV({ columns: null, rows: [["a\tb\nc"]] }) === "a b c");
+
+  /* The Google Sheets import warning fires on exactly the values it should. */
+  ok("leading zeros are counted", RF.leadingZeroValues(ready) > 0);
+  eq("nothing to warn about", RF.leadingZeroValues({ rows: [["Emma", "3", "12345"]] }), 0);
+  eq("0018472 counts", RF.leadingZeroValues({ rows: [["0018472"]] }), 1);
+  ok("a lone 0 is not a leading zero", RF.leadingZeroValues({ rows: [["0"]] }) === 0);
+
+  /* The other three sheets, on their own, for a computer with no Excel. */
+  const review = RF.reviewTable(r), report = RF.reportTable(r), trace = RF.traceTable(r);
+  ok("review csv has rows", RF.toCSV(review).split("\r\n").length > 1);
+  ok("report csv has rows", RF.toCSV(report).split("\r\n").length > 10);
+  eq("trace csv has one line per student", RF.toCSV(trace).split("\r\n").length - 1, r.stats.students);
+  eq("review file name", RF.csvFileName("Oakhaven Roster.xlsx", review.name),
+    "Oakhaven Roster - NEEDS REVIEW.csv");
+
+  /* The single-tab workbook, for an importer that insists on Excel. */
+  const one = new ExcelJS.Workbook();
+  await one.xlsx.load(await RF.buildReadyWorkbook(ExcelJS, r));
+  eq("single-sheet workbook has exactly one tab", one.worksheets.map(w => w.name), ["GOTPHOTO READY"]);
+  eq("...with the same rows", one.getWorksheet("GOTPHOTO READY").rowCount - 1, r.stats.students);
+  const oneIds = [];
+  one.getWorksheet("GOTPHOTO READY").eachRow((row, n) => { if (n > 1) oneIds.push(row.getCell(5).value); });
+  ok("...and its IDs are still text", oneIds.indexOf("0018472") >= 0, oneIds.slice(0, 3));
+}
+
+/* A deliberately independent RFC 4180 reader, so the test does not check the
+   writer against itself. */
+function parseCSVBack(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false, i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i += 2; continue; }
+      if (c === '"') { quoted = false; i++; continue; }
+      field += c; i++; continue;
+    }
+    if (c === '"' && field === "") { quoted = true; i++; continue; }
+    if (c === ",") { row.push(field); field = ""; i++; continue; }
+    if (c === "\r" && text[i + 1] === "\n") { row.push(field); rows.push(row); row = []; field = ""; i += 2; continue; }
+    field += c; i++;
+  }
+  row.push(field);
+  rows.push(row);
+  return rows;
+}
 
 function pick(n) { return [n.first, n.last]; }
 

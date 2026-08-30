@@ -1,4 +1,6 @@
-# School Photo Roster Fixer
+# Roster Fixer
+
+*by ClassPhoto.net — same family as ClassPhoto and ServiceStix.*
 
 Drop in whatever spreadsheet the school sent. Get back one clean row per
 student, ready to import into GotPhoto.
@@ -71,14 +73,52 @@ students**.
 
 ### 4. Download
 
-`[Original File Name] - CLEANED.xlsx`
+GotPhoto will not take a workbook with more than one tab in it, so the roster
+goes out on its own.
 
-| Sheet | What is on it |
+**Send this to GotPhoto**
+
+| | |
 | --- | --- |
-| **GOTPHOTO READY** | the cleaned roster, one row per student, every cell text |
-| **NEEDS REVIEW** | every issue with the student, source sheet, source row and an explanation |
-| **CLEANUP REPORT** | counts of everything that changed, plus the columns left out |
-| **SOURCE TRACE** | optional: every student, the rows behind them, and what changed |
+| `[Name] - GOTPHOTO READY.csv` | the roster, one tab, one row per student. Upload it straight to GotPhoto |
+| `[Name] - GOTPHOTO READY.xlsx` | the same single tab as Excel, if the importer asks for a workbook |
+| **Copy for Google Sheets** | puts the whole roster on the clipboard; paste it into cell A1 of a blank sheet |
+
+**Keep for yourself** — GotPhoto never sees these.
+
+| | |
+| --- | --- |
+| `[Name] - NEEDS REVIEW.csv` | every issue, with the source sheet and row it came from |
+| `[Name] - CLEANUP REPORT.csv` | counts of everything that changed, plus the columns left out |
+| `[Name] - SOURCE TRACE.csv` | every student, the rows behind them, and what changed |
+| `[Name] - CLEANED.xlsx` | all of the above as one workbook, source trace optional |
+
+Every sheet is built once as a table and then written out as both a tab and a
+CSV, so the CSV of a sheet and the Excel tab of that sheet cannot disagree.
+
+---
+
+## No Excel on the computer
+
+Nothing here needs it. The CSV is the main output, and it goes straight into
+GotPhoto without being opened at all. If you do want to look at it first:
+
+1. Open a blank sheet at [sheets.new](https://sheets.new).
+2. **File → Import → Upload**, and pick the CSV.
+3. Set **Convert text to numbers, dates and formulas** to **No**.
+4. **Import data**.
+
+Step 3 is the one that matters. Left on, Google Sheets turns a Student ID of
+`0018472` into `18472` — the exact thing this tool exists to prevent. The app
+counts the values at risk in your roster and says so on the download screen
+when there are any.
+
+The file itself is always correct: the CSV holds `0018472` as plain text, with
+no apostrophe and no `="..."` wrapper, because GotPhoto reads the file directly
+and either of those would arrive as part of the data. CSVs are written as
+UTF-8 with no byte-order mark, which is what Google Sheets and GotPhoto expect
+— desktop Excel is the only reader that wants the mark, and it is the one
+reader this path is designed to do without.
 
 ---
 
@@ -170,7 +210,7 @@ Emergency contacts are **not** treated as buyers unless you say they are.
 
 | | |
 | --- | --- |
-| `index.html` | the page and all of its styling |
+| `index.html` | the page and all of its styling, in the ClassPhoto house style |
 | `lib.js` | the whole cleanup engine — no DOM, no globals, testable on its own |
 | `app.js` | reads the file, draws the screen, feeds your choices back to the engine |
 | `test/` | the rules that are not allowed to break |

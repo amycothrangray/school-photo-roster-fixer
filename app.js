@@ -466,22 +466,164 @@ function renderWarnings() {
   $("warnings").innerHTML = html.join("");
 }
 
-/* -------------------------------------------------------- 4. download */
+/* -------------------------------------------------------- 4. download
+
+   Two shapes of the same cleaned roster. The CSV is the one that matters:
+   it is a single tab by definition, so an importer that refuses a workbook
+   with four sheets in it has nothing to refuse, and it opens in Google Sheets
+   on a computer with no Excel on it. The workbook is the keeping copy. */
 
 function renderDownload() {
   const r = S.result, st = r.stats;
   const left = st.counts.duplicates + st.counts.idConflicts + st.counts["bad-email"] + st.counts["bad-phone"];
+  const zeros = RF.leadingZeroValues(RF.readyTable(r));
+
   $("dlinfo").innerHTML =
-    '<div class="callout teal"><b>' + esc(RF.outputFileName(S.file ? S.file.name : "roster")) + "</b><br>" +
-    "Sheet 1 <b>GOTPHOTO READY</b> &mdash; " + plural(st.students, "student") + ", " +
-    r.columns.length + " columns, every value as text so IDs keep their leading zeros.<br>" +
-    "Sheet 2 <b>NEEDS REVIEW</b> &mdash; everything above that a human should look at.<br>" +
-    "Sheet 3 <b>CLEANUP REPORT</b> &mdash; what changed, and which columns were left out.</div>" +
-    (left ? '<div class="callout"><b>' + plural(left, "thing") + " still waiting on you</b> in step 3. " +
-      "You can download anyway &mdash; unresolved rows stay separate and are listed on the Needs Review " +
-      "sheet.</div>" : "");
+    (left ? '<div class="status-box warning show"><b>' + plural(left, "thing") +
+      " still waiting on you</b> in step 3. You can download anyway &mdash; unresolved rows stay " +
+      "separate and are listed under Needs Review.</div>" : "") +
+    '<div class="status-box info show"><b>' + plural(st.students, "student") + " &middot; " +
+    r.columns.length + " columns</b><br>Every value goes out as text, so a Student ID of " +
+    "0018472 stays 0018472.</div>";
+
+  $("dl-names").innerHTML =
+    '<div class="fname-preview">' + esc(RF.readyFileName(fileBase(), "csv")) + "</div>";
+
+  $("zerowarn").innerHTML = zeros
+    ? '<div class="status-box warning show"><b>This roster has ' + plural(zeros, "value") +
+      " starting with a zero</b> &mdash; Student IDs like <code>0018472</code>. They are correct in " +
+      "the file. Google Sheets will strip them <i>on import</i> unless you set " +
+      '<b>&ldquo;Convert text to numbers, dates and formulas&rdquo;</b> to <b>No</b>. ' +
+      "Sending the CSV straight to GotPhoto avoids the question entirely.</div>"
+    : "";
+
   renderAudit();
 }
+
+const fileBase = () => (S.file ? S.file.name : "roster");
+
+/* ---------------------------------------------------------- saving */
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* Plain UTF-8, no byte-order mark: a BOM would arrive at GotPhoto glued to the
+   front of the first column name, and Google Sheets detects UTF-8 without it. */
+function saveText(text, filename, mime) {
+  saveBlob(new Blob([text], { type: (mime || "text/csv") + ";charset=utf-8" }), filename);
+}
+
+function note(html, kind) {
+  $("dlnote").innerHTML = '<div class="status-box ' + (kind || "success") + ' show">' + html + "</div>";
+}
+
+function saved(filename) {
+  note("Saved <b>" + esc(filename) + "</b>. Your original file was not touched.");
+}
+
+/* Run something that might throw, with the button showing its work. */
+async function withButton(btn, label, fn) {
+  const was = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = label;
+  try {
+    await fn();
+  } catch (e) {
+    note("Could not build the file: " + esc(e.message), "error");
+  }
+  btn.innerHTML = was;
+  btn.disabled = false;
+}
+
+/* ---------------------------------------------------------- the buttons */
+
+function downloadReadyCSV() {
+  const name = RF.readyFileName(fileBase(), "csv");
+  saveText(RF.toCSV(RF.readyTable(S.result)), name);
+  saved(name);
+}
+
+function downloadReadyXLSX(btn) {
+  return withButton(btn, "Building...", async () => {
+    const buf = await RF.buildReadyWorkbook(ExcelJS, S.result);
+    const name = RF.readyFileName(fileBase(), "xlsx");
+    saveBlob(new Blob([buf], { type: XLSX_MIME }), name);
+    saved(name);
+  });
+}
+
+function downloadWorkbook(btn) {
+  return withButton(btn, "Building...", async () => {
+    const buf = await RF.buildWorkbook(ExcelJS, S.result, { trace: $("trace").checked });
+    const name = RF.outputFileName(fileBase());
+    saveBlob(new Blob([buf], { type: XLSX_MIME }), name);
+    saved(name);
+  });
+}
+
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+function downloadSheetCSV(which) {
+  const table = which === "review" ? RF.reviewTable(S.result)
+    : which === "report" ? RF.reportTable(S.result)
+      : RF.traceTable(S.result);
+  const name = RF.csvFileName(fileBase(), table.name);
+  saveText(RF.toCSV(table), name);
+  saved(name);
+}
+
+/* Copy for Google Sheets. Tab-separated straight onto the clipboard, so it
+   pastes into a blank sheet as cells rather than as one long line. The
+   execCommand fallback is for opening this page from a file:// path, where
+   the async clipboard API is not available. */
+async function copyForSheets(btn) {
+  const tsv = RF.toTSV(RF.readyTable(S.result));
+  let done = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(tsv);
+      done = true;
+    }
+  } catch (e) { /* fall through to the old way */ }
+  if (!done) done = legacyCopy(tsv);
+
+  if (done) {
+    const was = btn.innerHTML;
+    btn.classList.add("copied");
+    btn.querySelector(".dl-title").textContent = "Copied";
+    setTimeout(() => { btn.innerHTML = was; btn.classList.remove("copied"); }, 2200);
+    note('Copied &mdash; ' + plural(S.result.stats.students, "student") + " plus the header row. " +
+      'Open <a href="https://sheets.new" target="_blank" rel="noopener">a blank Google Sheet</a>, ' +
+      "click cell A1 and paste.");
+  } else {
+    note("This browser would not let the page copy for you. Download the CSV instead &mdash; " +
+      "it opens in Google Sheets the same way.", "error");
+  }
+}
+
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+/* ---------------------------------------------------------- the trace */
 
 function renderAudit() {
   const r = S.result;
@@ -497,36 +639,12 @@ function renderAudit() {
   $("audit").innerHTML = '<details id="auditbox"><summary>Where every student came from' +
     '<span class="c q">' + r.students.length + "</span></summary>" +
     '<div class="hint" style="margin:8px 0">Every final row, the source rows behind it, and what was ' +
-    "changed on the way. Tick the source-trace box above to get this as a fourth sheet in the download.</div>" +
+    "changed on the way. Tick the source-trace box above to get this as a fourth sheet in the " +
+    "workbook, or download it on its own as a CSV.</div>" +
     '<div class="scroll" style="max-height:420px;overflow:auto"><table class="t"><thead><tr>' +
     "<th>Student</th><th>Grade</th><th>Teacher</th><th>ID</th><th>Came from</th><th>What changed</th>" +
     "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
     (r.students.length > 400 ? '<div class="hint">Showing the first 400.</div>' : "") + "</details>";
-}
-
-async function download() {
-  const btn = $("btn-dl");
-  btn.disabled = true;
-  const was = btn.textContent;
-  btn.textContent = "Building...";
-  try {
-    const buf = await RF.buildWorkbook(ExcelJS, S.result, { trace: $("trace").checked });
-    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = RF.outputFileName(S.file ? S.file.name : "roster");
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    $("dlnote").innerHTML = '<div class="hint" style="margin-top:10px">Saved. Your original file was ' +
-      "not touched.</div>";
-  } catch (e) {
-    $("dlnote").innerHTML = '<div class="err">Could not build the file: ' + esc(e.message) + "</div>";
-  }
-  btn.textContent = was;
-  btn.disabled = false;
 }
 
 /* ---------------------------------------------------------- sidebar */
@@ -567,7 +685,13 @@ $("btn-fix").addEventListener("click", () => {
   setStep(4);
   $("card3").scrollIntoView({ block: "start" });
 });
-$("btn-dl").addEventListener("click", download);
+$("dl-csv").addEventListener("click", downloadReadyCSV);
+$("dl-copy").addEventListener("click", function () { copyForSheets(this); });
+$("dl-xlsx1").addEventListener("click", function () { downloadReadyXLSX(this); });
+$("dl-book").addEventListener("click", function () { downloadWorkbook(this); });
+$("dl-review").addEventListener("click", () => downloadSheetCSV("review"));
+$("dl-report").addEventListener("click", () => downloadSheetCSV("report"));
+$("dl-trace").addEventListener("click", () => downloadSheetCSV("trace"));
 document.querySelectorAll(".step").forEach(el => el.addEventListener("click", () => {
   const s = parseInt(el.dataset.step, 10);
   if (S.book && s <= S.step) $("card" + s).scrollIntoView({ block: "start" });

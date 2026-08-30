@@ -1560,11 +1560,15 @@ function outputRows(students, parents) {
   });
 }
 
-/* ====================================================== the cleaned workbook
+/* ====================================================== the cleaned output
 
-   Three sheets: the roster GotPhoto imports, everything that still needs a
-   human, and a report of what happened. Every cell is written as text so a
-   Student ID of 0018472 stays 0018472. */
+   Everything you can download is built here, and it is built twice over the
+   same tables: each sheet is first assembled as a plain { columns, rows }
+   table, and only then written out as an Excel tab or as a CSV. The CSV of a
+   sheet and the Excel tab of that sheet are therefore the same numbers by
+   construction -- they cannot drift apart.
+
+   Every value is text. A Student ID of 0018472 stays 0018472 in all of them. */
 
 const ISSUE_LABEL = {
   "no-name": "No student name", "missing-last": "Missing last name",
@@ -1578,95 +1582,78 @@ const ISSUE_LABEL = {
   "possible-duplicate": "Possible duplicate students", "id-conflict": "One ID, two names"
 };
 const SEVERITY_LABEL = { critical: "Fix before import", warn: "Check", review: "Decide" };
-const NAVY = "FF16324A", CREAM = "FFFDF6EC", TEAL = "FF177E7E", CORAL = "FFE4643B";
+
+/* The ClassPhoto palette, so the workbook matches the app it came out of. */
+const NAVY = "FF0F172A", BLUE = "FF2563EB", BLUE_BG = "FFEFF6FF", AMBER = "FFF59E0B";
 
 function sheetName(file) { return String(file || "roster").replace(/\.[^.]+$/, ""); }
 const outputFileName = file => sheetName(file) + " - CLEANED.xlsx";
+const readyFileName = (file, ext) => sheetName(file) + " - GOTPHOTO READY." + (ext || "csv");
+const csvFileName = (file, label) => sheetName(file) + " - " + label + ".csv";
 
-function styleHeader(ws, row, color) {
-  row.eachCell(cell => {
-    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color || NAVY } };
-    cell.alignment = { vertical: "middle", horizontal: "left" };
-    cell.border = { bottom: { style: "thin", color: { argb: "FFB9C6D1" } } };
-  });
-  row.height = 20;
-}
-function autoWidth(ws, min, max) {
-  ws.columns.forEach(col => {
-    let w = min || 10;
-    col.eachCell({ includeEmpty: false }, c => {
-      const len = String(c.value == null ? "" : c.value).length + 2;
-      if (len > w) w = len;
-    });
-    col.width = Math.min(w, max || 42);
-  });
+const asText = v => String(v == null ? "" : v);
+
+/* ------------------------------------------------------------ the tables */
+
+/* Sheet 1. This is the only one GotPhoto ever sees: one row per student,
+   nothing else on it, no second tab underneath it. */
+function readyTable(result) {
+  return { name: "GOTPHOTO READY", columns: result.columns.slice(),
+    rows: result.rows.map(r => r.map(asText)) };
 }
 
-function buildWorkbook(ExcelJS, result, opts) {
-  opts = opts || {};
-  const wb = new ExcelJS.Workbook();
-  wb.creator = "School Photo Roster Fixer";
-  wb.created = new Date();
-
-  /* ---------------- 1. GOTPHOTO READY ---------------- */
-  const ready = wb.addWorksheet("GOTPHOTO READY", { views: [{ state: "frozen", ySplit: 1 }] });
-  styleHeader(ready, ready.addRow(result.columns));
-  result.rows.forEach(r => ready.addRow(r.map(v => String(v == null ? "" : v))));
-  ready.columns.forEach(c => { c.numFmt = "@"; });
-  autoWidth(ready, 12, 34);
-  if (result.rows.length) {
-    ready.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: result.columns.length } };
-  }
-
-  /* ---------------- 2. NEEDS REVIEW ---------------- */
-  const rev = wb.addWorksheet("NEEDS REVIEW", { views: [{ state: "frozen", ySplit: 1 }] });
-  styleHeader(rev, rev.addRow(["Issue", "What to do", "Student", "Grade", "Teacher", "Student ID",
-    "Source sheet", "Source row", "Details"]), CORAL);
+/* Sheet 2. Everything a human still has to look at, with the source row it
+   came from so it can be found in the school's original file. */
+function reviewTable(result) {
+  const columns = ["Issue", "What to do", "Student", "Grade", "Teacher", "Student ID",
+    "Source sheet", "Source row", "Details"];
+  const rows = [];
   const where = s => (s.sources || []).map(x => x.row).join(", ");
   const sheetOf = s => Array.from(new Set((s.sources || []).map(x => x.sheet))).join(", ");
+
   result.issues.filter(i => i.severity !== "info").forEach(i => {
     const s = i.student;
-    rev.addRow([ISSUE_LABEL[i.type] || i.type, SEVERITY_LABEL[i.severity] || i.severity,
+    rows.push([ISSUE_LABEL[i.type] || i.type, SEVERITY_LABEL[i.severity] || i.severity,
       [s.first, s.last].filter(Boolean).join(" ") || "(no name)", s.grade || "", s.teacher || "",
       s.id || "", sheetOf(s), where(s), i.text]);
   });
   result.reviews.filter(r => (r.type === "possible-duplicate" && r.choice === "separate") || r.type === "id-conflict")
     .forEach(r => {
       const names = r.cards.map(c => c.name + " (" + c.where.join(", ") + ")").join("  vs  ");
-      rev.addRow([ISSUE_LABEL[r.type] || r.type, "Decide", r.cards.map(c => c.name).join(" / "),
+      rows.push([ISSUE_LABEL[r.type] || r.type, "Decide", r.cards.map(c => c.name).join(" / "),
         r.cards.map(c => c.grade).join(" / "), r.cards.map(c => c.teacher).join(" / "),
         r.cards.map(c => c.id).join(" / "),
         Array.from(new Set(r.cards.map(c => c.where.map(w => w.split(":")[0]).join(",")))).join(" / "),
         r.cards.map(c => c.where.join(",")).join(" / "), r.title + " - " + r.detail + ". " + names]);
     });
   result.teacherVariants.forEach(t => {
-    rev.addRow(["Teacher spelled two ways", "Check", "", "", t.names.map(n => n.name).join(" / "), "", "", "",
+    rows.push(["Teacher spelled two ways", "Check", "", "", t.names.map(n => n.name).join(" / "), "", "", "",
       "These may be one classroom: " + t.names.map(n => n.name + " (" + n.n + ")").join(", ") +
       ". Nothing was merged."]);
   });
-  if (rev.rowCount === 1) rev.addRow(["Nothing", "", "", "", "", "", "", "", "Every row came through clean."]);
-  autoWidth(rev, 10, 70);
+  if (!rows.length) rows.push(["Nothing", "", "", "", "", "", "", "", "Every row came through clean."]);
+  return { name: "NEEDS REVIEW", columns: columns, rows: rows.map(r => r.map(asText)) };
+}
 
-  /* ---------------- 3. CLEANUP REPORT ---------------- */
-  const rep = wb.addWorksheet("CLEANUP REPORT");
-  const st = result.stats;
-  const section = title => {
-    const r = rep.addRow([title, ""]);
-    r.getCell(1).font = { bold: true, size: 12, color: { argb: NAVY } };
-    r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: CREAM } };
-    r.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: CREAM } };
-  };
-  const line = (label, value) => { if (value !== 0 || opts.allLines) rep.addRow([label, value]); };
-  styleHeader(rep, rep.addRow(["School Photo Roster Fixer", sheetName(result.book.fileName)]), TEAL);
-  rep.addRow(["Cleaned", new Date().toLocaleString()]);
-  rep.addRow([]);
+/* Sheet 3. What changed, and what was left behind. `sections` marks the rows
+   that are headings rather than data, so Excel can bold them and a CSV can
+   just leave them as ordinary rows. */
+function reportTable(result, opts) {
+  opts = opts || {};
+  const st = result.stats, rows = [], sections = [];
+  const section = title => { sections.push(rows.length); rows.push([title, ""]); };
+  const line = (label, value) => { if (value !== 0 || opts.allLines) rows.push([label, value]); };
+  const blank = () => rows.push(["", ""]);
+
+  rows.push(["School Photo Roster Fixer", sheetName(result.book.fileName)]);
+  rows.push(["Cleaned", new Date().toLocaleString()]);
+  blank();
   section("Where it came from");
   line("Source rows read", st.sourceRows);
   line("Sheets used", st.sheetsUsed);
   line("Sheets skipped", st.sheetsSkipped);
   line("Final students", st.students);
-  rep.addRow([]);
+  blank();
   section("Fixed automatically");
   line("Duplicate household rows merged", st.rowsMerged);
   line("  ...matched on Student ID", st.mergedById);
@@ -1691,7 +1678,7 @@ function buildWorkbook(ExcelJS, result, opts) {
   line("Hidden rows included", st.hiddenRows);
   line("Hidden columns read", st.hiddenCols);
   line("Odd characters cleaned up", st.chars.odd);
-  rep.addRow([]);
+  blank();
   section("Needs review");
   const c = st.counts;
   line("Possible duplicate students", c.duplicates);
@@ -1711,31 +1698,147 @@ function buildWorkbook(ExcelJS, result, opts) {
   line("Teacher spelled more than one way", c.teacherVariants);
   line("Look-alike pairs found but not listed", st.moreDuplicates);
   line("Students in name blocks too big to compare pair by pair", st.crowdedNames);
-  rep.addRow([]);
+  blank();
   section("Columns not exported");
-  if (!result.unused.length) rep.addRow(["(none)", ""]);
-  result.unused.forEach(u => rep.addRow([u.sheet + " - " + u.header, u.why + (u.sample ? '  e.g. "' + u.sample + '"' : "")]));
-  rep.addRow([]);
-  rep.addRow(["Contacts per student exported", st.parentSlots]);
-  rep.addRow(["Students with an email", st.withEmail]);
-  rep.addRow(["Students with a phone", st.withPhone]);
+  if (!result.unused.length) rows.push(["(none)", ""]);
+  result.unused.forEach(u => rows.push([u.sheet + " - " + u.header,
+    u.why + (u.sample ? '  e.g. "' + u.sample + '"' : "")]));
+  blank();
+  rows.push(["Contacts per student exported", st.parentSlots]);
+  rows.push(["Students with an email", st.withEmail]);
+  rows.push(["Students with a phone", st.withPhone]);
+
+  return { name: "CLEANUP REPORT", columns: null, sections: sections,
+    rows: rows.map(r => r.map(asText)) };
+}
+
+/* Sheet 4, optional. Every student, the rows behind them, and what changed. */
+function traceTable(result) {
+  const columns = ["Student", "Grade", "Teacher", "Student ID", "Came from", "Rows merged",
+    "What changed", "Not exported"];
+  const rows = result.students.map(s => [
+    [s.first, s.last].filter(Boolean).join(" "), s.grade, s.teacher, s.id,
+    s.sources.map(x => x.sheet + " row " + x.row +
+      (x.exact ? " (exact duplicate)" : x.merged ? " (merged)" : "")).join("; "),
+    s.sources.length, s.changes.join("; "),
+    s.dropped.map(d => d.what + ' "' + d.value + '" - ' + d.why).join("; ")
+  ]);
+  return { name: "SOURCE TRACE", columns: columns, rows: rows.map(r => r.map(asText)) };
+}
+
+/* --------------------------------------------------------- CSV and TSV
+
+   RFC 4180. A field is quoted when it holds a quote, the delimiter, a line
+   break, or leading/trailing space -- and nothing is ever prefixed with an
+   apostrophe or wrapped in ="...", because this file is read by GotPhoto, not
+   only by a spreadsheet, and those tricks would arrive as part of the data. */
+
+function csvField(v, delim) {
+  const s = asText(v);
+  if (s === "") return "";
+  return (s.indexOf('"') >= 0 || s.indexOf(delim) >= 0 || /[\r\n]/.test(s) || /^\s|\s$/.test(s))
+    ? '"' + s.replace(/"/g, '""') + '"'
+    : s;
+}
+
+function toDelimited(table, delim, eol) {
+  const out = [];
+  if (table.columns) out.push(table.columns.map(v => csvField(v, delim)).join(delim));
+  table.rows.forEach(r => out.push(r.map(v => csvField(v, delim)).join(delim)));
+  return out.join(eol || "\r\n");
+}
+
+const toCSV = table => toDelimited(table, ",", "\r\n");
+
+/* For the clipboard. Google Sheets splits a pasted block on tabs and newlines
+   before it looks at quoting, so anything that could be mistaken for a cell
+   break is flattened to a space first. The scrubber has normally taken these
+   out already; this is the belt to that pair of braces. */
+function toTSV(table) {
+  const flat = t => ({ columns: t.columns && t.columns.map(v => asText(v).replace(/[\t\r\n]+/g, " ")),
+    rows: t.rows.map(r => r.map(v => asText(v).replace(/[\t\r\n]+/g, " "))) });
+  return toDelimited(flat(table), "\t", "\n");
+}
+
+/* How many values Google Sheets would quietly rewrite if the import dialog's
+   "Convert text to numbers, dates and formulas" box is left ticked. A leading
+   zero is the case that actually bites: 0018472 comes back as 18472. */
+function leadingZeroValues(table) {
+  let n = 0;
+  table.rows.forEach(r => r.forEach(v => { if (/^0\d/.test(asText(v))) n++; }));
+  return n;
+}
+
+/* --------------------------------------------------------- the workbooks */
+
+function styleHeader(ws, row, color) {
+  row.eachCell(cell => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color || NAVY } };
+    cell.alignment = { vertical: "middle", horizontal: "left" };
+    cell.border = { bottom: { style: "thin", color: { argb: "FFB9C6D1" } } };
+  });
+  row.height = 20;
+}
+function autoWidth(ws, min, max) {
+  ws.columns.forEach(col => {
+    let w = min || 10;
+    col.eachCell({ includeEmpty: false }, c => {
+      const len = String(c.value == null ? "" : c.value).length + 2;
+      if (len > w) w = len;
+    });
+    col.width = Math.min(w, max || 42);
+  });
+}
+
+/* One table -> one worksheet, every cell text. */
+function addTableSheet(wb, table, color, min, max) {
+  const ws = wb.addWorksheet(table.name, table.columns ? { views: [{ state: "frozen", ySplit: 1 }] } : {});
+  if (table.columns) styleHeader(ws, ws.addRow(table.columns), color);
+  table.rows.forEach(r => ws.addRow(r));
+  ws.columns.forEach(c => { c.numFmt = "@"; });
+  autoWidth(ws, min, max);
+  if (table.columns && table.rows.length) {
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: table.columns.length } };
+  }
+  return ws;
+}
+
+/* The single-tab workbook: exactly the GOTPHOTO READY table and nothing else,
+   for an importer that rejects a file with more than one sheet in it. */
+function buildReadyWorkbook(ExcelJS, result) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "School Photo Roster Fixer";
+  wb.created = new Date();
+  addTableSheet(wb, readyTable(result), NAVY, 12, 34);
+  return wb.xlsx.writeBuffer();
+}
+
+/* The full workbook: the roster, what still needs a human, what changed, and
+   optionally where every student came from. */
+function buildWorkbook(ExcelJS, result, opts) {
+  opts = opts || {};
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "School Photo Roster Fixer";
+  wb.created = new Date();
+
+  addTableSheet(wb, readyTable(result), NAVY, 12, 34);
+  addTableSheet(wb, reviewTable(result), AMBER, 10, 70);
+
+  const report = reportTable(result, opts);
+  const rep = wb.addWorksheet(report.name);
+  report.rows.forEach(r => rep.addRow(r));
+  styleHeader(rep, rep.getRow(1), BLUE);
+  report.sections.forEach(i => {
+    const r = rep.getRow(i + 1);
+    r.getCell(1).font = { bold: true, size: 12, color: { argb: NAVY } };
+    r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLUE_BG } };
+    r.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLUE_BG } };
+  });
   rep.getColumn(1).width = 44;
   rep.getColumn(2).width = 54;
 
-  /* ---------------- 4. SOURCE TRACE (optional) ---------------- */
-  if (opts.trace) {
-    const tr = wb.addWorksheet("SOURCE TRACE", { views: [{ state: "frozen", ySplit: 1 }] });
-    styleHeader(tr, tr.addRow(["Student", "Grade", "Teacher", "Student ID", "Came from", "Rows merged",
-      "What changed", "Not exported"]), TEAL);
-    result.students.forEach(s => {
-      tr.addRow([[s.first, s.last].filter(Boolean).join(" "), s.grade, s.teacher, s.id,
-        s.sources.map(x => x.sheet + " row " + x.row + (x.exact ? " (exact duplicate)" : x.merged ? " (merged)" : "")).join("; "),
-        s.sources.length, s.changes.join("; "),
-        s.dropped.map(d => d.what + ' "' + d.value + '" - ' + d.why).join("; ")]);
-    });
-    tr.columns.forEach(col => { col.numFmt = "@"; });
-    autoWidth(tr, 12, 60);
-  }
+  if (opts.trace) addTableSheet(wb, traceTable(result), BLUE, 12, 60);
 
   return wb.xlsx.writeBuffer();
 }
@@ -1746,7 +1849,9 @@ return {
   scrub, scrubMulti, key, looseKey, fixCase, splitName, normGrade, normTeacher, teacherKey, normId,
   cleanEmail, cleanPhone, splitEmails, splitPhones, splitNames, headerNorm, detectColumn, assignSlots,
   findHeaderRow, headerScore, parseCSV, readWorkbook, sheetImplies, buildColumns, analyze,
-  buildWorkbook, outputColumns, outputFileName, nameLikeness, editDistance, mergeContacts,
+  buildWorkbook, buildReadyWorkbook, outputColumns, outputFileName, readyFileName, csvFileName,
+  readyTable, reviewTable, reportTable, traceTable, toCSV, toTSV, leadingZeroValues,
+  nameLikeness, editDistance, mergeContacts,
   colLetter, fieldLabel, FIELD_LABEL, F, PARENT_FIELDS, GRADE_ORDER, ISSUE_LABEL, SEVERITY_LABEL
 };
 });
