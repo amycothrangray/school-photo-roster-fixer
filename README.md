@@ -24,6 +24,12 @@ It is four static files with no build step, so any static host works — and
 double-clicking `index.html` works too, as long as you are online (SheetJS and
 ExcelJS load from a CDN).
 
+`_headers` ships a Content-Security-Policy with `connect-src 'none'`, so on
+Netlify the app is *incapable* of sending anything anywhere — no fetch, no XHR,
+no beacon. A roster full of children's names and their parents' phone numbers
+physically cannot leave the browser, and anyone can check that from the
+response headers.
+
 ---
 
 ## Using it

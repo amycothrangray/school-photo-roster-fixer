@@ -1,0 +1,24 @@
+# Security headers, in the same spirit as the ClassPhoto ones.
+#
+# The Content-Security-Policy is what proves the privacy claim on the page:
+# connect-src 'none' means this app is incapable of sending anything anywhere.
+# No fetch, no XHR, no WebSocket, no beacon. A roster full of children's names
+# and their parents' phone numbers physically cannot leave the browser, and
+# anyone can verify that from the response headers alone.
+#
+# The only external hosts are read-only resource loads:
+#   cdnjs.cloudflare.com   SheetJS (reads the upload) + ExcelJS (writes the download)
+#   fonts.googleapis.com   Google Fonts stylesheet
+#   fonts.gstatic.com      the font files themselves
+#
+# Scripts are 'self' with no 'unsafe-inline' -- index.html carries no inline
+# script at all. Styles need 'unsafe-inline' because the stylesheet lives in a
+# <style> block and a few elements are positioned with style attributes.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin
