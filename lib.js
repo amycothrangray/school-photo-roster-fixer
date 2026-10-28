@@ -69,16 +69,24 @@ const titleWord = w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
 
 /* Case-fix a person's name -- but only the pieces that are shouting or
    whispering. Mixed-case input is left exactly as the school typed it, so
-   DeShawn, McRae and van Dijk all survive untouched. */
+   DeShawn, McRae and van Dijk all survive untouched.
+
+   Grade abbreviations are words, not shouting, so JK stays JK. So does any
+   other two- or three-letter capital word in a line that is not all capitals:
+   "JK - Ms. Harper" meant those capitals, "EMMA LI" did not. */
+const KEEP_UPPER = new Set(["JK", "TK", "PK", "PS", "KG", "SK"]);
 function fixCase(raw) {
   const s = scrub(raw);
   if (!s) return "";
+  const shouting = !/[a-z]/.test(deaccent(s));
   return s.split(" ").map(word => {
     const bare = deaccent(word);
     const isUpper = word === word.toUpperCase() && /[A-Z]/.test(bare);
     const isLower = word === word.toLowerCase() && /[a-z]/.test(bare);
     if (!isUpper && !isLower) return word;                     // already mixed -- hands off
     if (/^[A-Za-z]\.?$/.test(bare)) return word.toUpperCase(); // single initial
+    if (isUpper && (KEEP_UPPER.has(bare.replace(/\./g, "")) || (!shouting && /^[A-Z]{2,3}$/.test(bare))))
+      return word;
     let out = word.replace(LETTERS, m => titleWord(m));
     if (isUpper) {
       out = out.replace(/^(Mc)([a-z])/, (m, a, b) => a + b.toUpperCase());
@@ -99,10 +107,58 @@ const PARTICLES = new Set(["van", "von", "de", "del", "dela", "della", "der", "d
 const NOT_A_NAME = /^(n\/?a|none|unknown|tbd|test|no name|\.|-|--)$/i;
 const suffixOf = w => SUFFIXES[String(w == null ? "" : w).toLowerCase().replace(/\./g, "")] || null;
 
+/* "Sawyer Hale (Male)", "Elizabeth (Tessa) Quill", 'Robert "Bobby" Lane'.
+   Whatever sits in brackets or double quotes inside a name cell is a note
+   about the child, never part of a name -- so a last name can never start
+   with "(". A gender note and an office note ("new", "twin") are taken out;
+   anything else is the name the child goes by, and that is the name that
+   goes on the photo. */
+const GENDER_NOTE = /^(male|female|boy|girl|m|f)$/i;
+const OFFICE_NOTE = /^(new|new student|withdrawn|withdrew|transfer|transferred|twin|absent|moved|inactive|tbd|\?+)$|\d/i;
+function nameNotes(raw) {
+  const out = { text: "", gender: "", nickname: "", dropped: [] };
+  let text = scrub(raw).replace(/\s*(?:\(([^()]*)\)|\[([^\[\]]*)\]|"([^"]*)")\s*/g, (m, a, b, c) => {
+    const t = scrub(a != null ? a : b != null ? b : c);
+    if (!t) return " ";
+    if (GENDER_NOTE.test(t)) out.gender = out.gender || t;
+    else if (OFFICE_NOTE.test(t) || out.nickname) out.dropped.push(t);
+    else out.nickname = t;
+    return " ";
+  });
+  /* A stray bracket with no partner still must not reach the export. */
+  text = text.replace(/[()\[\]"]/g, " ").replace(/\s+/g, " ").trim();
+  if (!text && out.nickname) { text = out.nickname; out.nickname = ""; }
+  out.text = text;
+  return out;
+}
+
 /* Split one full-name string into parts.
    confidence: "sure" (nothing to guess) / "likely" (a defensible rule fired) /
-   "check" (a human should glance at it). Never invents or drops characters. */
+   "check" (a human should glance at it). Never invents or drops characters
+   other than the bracketed notes above, and those are reported back:
+   `gender`, `dropped`, and `legalFirst` when a nickname took the first name. */
 function splitName(raw) {
+  const notes = nameNotes(raw);
+  const out = splitBare(notes.text);
+  out.raw = scrub(raw);
+  out.gender = notes.gender;
+  out.droppedNotes = notes.dropped;
+  out.legalFirst = "";
+  if (notes.nickname) {
+    /* The nickname replaces the whole given name, so "Mary Kate (Molly)
+       Smith" is no longer a question about how much of it is the first name. */
+    out.legalFirst = [out.first, out.middle].filter(Boolean).join(" ");
+    out.first = fixCase(notes.nickname);
+    out.middle = "";
+    if (out.altFirst) {
+      delete out.altFirst; delete out.altMiddle;
+      out.confidence = "likely"; out.note = "nickname used as the first name";
+    }
+  }
+  return out;
+}
+
+function splitBare(raw) {
   const s = scrub(raw).replace(/^[,;\s]+|[,;\s]+$/g, "");
   const out = { first: "", last: "", middle: "", suffix: "", confidence: "sure", note: "", raw: scrub(raw) };
   if (!s || NOT_A_NAME.test(s)) { out.confidence = "check"; out.note = s ? "not a name" : "blank"; return out; }
@@ -187,6 +243,7 @@ function normGrade(raw) {
   if (/^(prek|pk|prekindergarten|prekinder|pre)$/.test(bare)) return same("PK");
   if (/^(preschool|ps|nursery)$/.test(bare)) return same("PS");
   if (/^(tk|transitionalkindergarten|transk|transitionalk)$/.test(bare)) return same("TK");
+  if (/^(jk|juniorkindergarten|juniork|juniorkinder)$/.test(bare)) return same("JK");
   if (/^(k|kg|kn|kd|kinder|kindergarten|kindergarden|k5|fulldayk|halfdayk)$/.test(bare)) return same("K");
 
   const m = bare.match(/^0*(\d{1,2})(st|nd|rd|th)?$/);
@@ -200,22 +257,50 @@ function normGrade(raw) {
   return { value: s, changed: false, ok: false, note: "unrecognized grade" };
 }
 
-const GRADE_ORDER = ["PS", "PK", "TK", "K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
-const ELEMENTARY = new Set(["PS", "PK", "TK", "K", "1", "2", "3", "4", "5", "6"]);
+const GRADE_ORDER = ["PS", "PK", "JK", "TK", "K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+const ELEMENTARY = new Set(["PS", "PK", "JK", "TK", "K", "1", "2", "3", "4", "5", "6"]);
 const gradeRank = g => { const i = GRADE_ORDER.indexOf(g); return i < 0 ? 99 : i; };
+
+/* Is this whole piece of text a grade, worded any way a school words one?
+   "JK", "Kinder", "First Grade", "Grade One", "5th/6th", "Seventh & Eighth
+   Grade". Returns the earliest grade's place in GRADE_ORDER, for sorting,
+   or -1. The text itself is never rewritten here. */
+function gradePhrase(raw) {
+  let k = looseKey(raw);
+  if (!k) return -1;
+  k = k.replace(/\bpre (k|kindergarten|kinder)\b/g, "prek").replace(/\bpre school\b/g, "preschool")
+    .replace(/\b(transitional|trans) (kindergarten|kinder|k)\b/g, "tk")
+    .replace(/\bjunior (kindergarten|kinder|k)\b/g, "jk")
+    .replace(/\b(half|full) day (kindergarten|kinder|k)\b/g, "k");
+  const words = k.split(" ").filter(w => w && !/^(grade|grades|gr|grd|level|and|class)$/.test(w));
+  if (!words.length) return -1;
+  let best = 99;
+  for (const w of words) {
+    const g = normGrade(w);
+    const i = g.ok ? GRADE_ORDER.indexOf(g.value) : -1;
+    if (i < 0) return -1;
+    best = Math.min(best, i);
+  }
+  return best;
+}
+const gradeSortRank = g => { const i = gradePhrase(g); return i < 0 ? 99 : i; };
 
 /* ================================================================ teacher */
 
 const TITLES = { mr: "Mr.", mrs: "Mrs.", ms: "Ms.", miss: "Miss", mx: "Mx.", dr: "Dr.",
   madame: "Madame", mme: "Mme.", sra: "Sra.", srta: "Srta.", profe: "Profe." };
 
-/* Tidy spacing and case, and put the period back on Mrs -- nothing more. A
-   teacher's actual name is never rewritten. */
+/* Tidy spacing and case, put the period back on Mrs, and take "'s Class" off
+   the end -- nothing more. A teacher's actual name is never rewritten. */
 function normTeacher(raw) {
   const s = scrub(raw);
   if (!s) return { value: "", changed: false, note: "" };
   if (NOT_A_NAME.test(s)) return { value: "", changed: true, note: "not a teacher name" };
   let flipped = false, text = s;
+
+  /* "Mrs. Pellham's Class" and "Mrs. Davies' Class" name the teacher. */
+  const bare = text.replace(/(?:'s|')?\s+(?:class|classroom|homeroom)$/i, "");
+  if (bare !== text && /[A-Za-z]/.test(bare)) text = bare;
 
   /* "SMITH, JENNIFER" names the same classroom as "Jennifer Smith". Flip it so
      the two collapse instead of splitting one class in half. */
@@ -225,9 +310,11 @@ function normTeacher(raw) {
     flipped = true;
   }
 
-  const value = text.split(" ").filter(Boolean).map((w, i) => {
+  /* Case is fixed across the whole name at once, so a short capital word is
+     judged against the rest of the line rather than on its own. */
+  const value = fixCase(text).split(" ").filter(Boolean).map((w, i) => {
     const t = TITLES[deaccent(w).toLowerCase().replace(/\./g, "")];
-    return (t && i === 0) ? t : fixCase(w);
+    return (t && i === 0) ? t : w;
   }).join(" ");
   return { value, changed: value !== s, note: flipped ? "read as Last, First" : "" };
 }
@@ -235,8 +322,31 @@ function normTeacher(raw) {
 /* Surname-only key, for spotting "Mrs Smith" / "Mrs. Smith" / "Jennifer Smith"
    variants of one teacher. Used to flag them, never to merge them. */
 function teacherKey(t) {
-  const words = looseKey(t).split(" ").filter(w => w && TITLES[w] === undefined);
+  const words = looseKey(t).split(" ").filter(w => w && TITLES[w] === undefined && !CLASS_WORD.test(w));
   return words.length ? words[words.length - 1] : "";
+}
+const CLASS_WORD = /^(s|class|classroom|homeroom)$/;
+
+/* "First Grade - Mrs. Pellham's Class": the grade and the classroom in one
+   cell. The grade half goes out exactly as the school wrote it, and the
+   other half is the teacher. Either order works. Null when neither half on
+   its own reads as a grade. */
+function splitGroupTeacher(raw) {
+  const s = scrub(raw);
+  if (!s) return null;
+  const tries = [];
+  let m = s.match(/^(.+?)\s+-\s+(.+)$/);
+  if (m) tries.push([m[1], m[2]]);
+  m = s.match(/^(.+?)\s*[:|]\s*(.+)$/);
+  if (m) tries.push([m[1], m[2]]);
+  m = s.match(/^(.+?)\s+((?:mr|mrs|ms|miss|mx|dr)\.?\s+.+)$/i);   // "2nd Grade Mrs. Pellham"
+  if (m) tries.push([m[1], m[2]]);
+  for (const [a, b] of tries) {
+    const ga = gradePhrase(a) >= 0, gb = gradePhrase(b) >= 0;
+    if (ga && !gb) return { group: a.trim(), teacher: b.trim() };
+    if (gb && !ga) return { group: b.trim(), teacher: a.trim() };
+  }
+  return null;
 }
 
 /* ============================================================= student ID */
@@ -353,6 +463,85 @@ function splitNames(raw) {
   return parts.length >= 2 ? parts : [s];
 }
 
+/* A "Parent(s)" cell: "Jane Doe & Chris Brown", "John and Mary Smith",
+   "Pat / Sam Lee". Split on & / and / + / ;, then hand a surname written once
+   at the end to every name in front of it that has none. */
+const PARENT_JOIN = /\s*(?:[;\n&+\/]|\band\b)\s*/i;
+function splitParentNames(raw) {
+  const s = scrubMulti(raw);
+  if (!s) return [];
+  const names = s.split(PARENT_JOIN).map(p => scrub(p)).filter(Boolean).map(p => splitName(p));
+  const tail = names.slice().reverse().find(n => n.first && n.last);
+  names.forEach(n => {
+    if (n.first && !n.last && tail && n !== tail) { n.last = tail.last; n.sharedSurname = true; }
+  });
+  return names.filter(n => n.first || n.last);
+}
+
+/* Does this look like people's names -- capitalised words, maybe joined with
+   "&" -- rather than a code, a date or a sentence? Used to notice a column of
+   parent names nobody mapped. */
+function looksLikeNames(raw) {
+  const s = scrub(raw);
+  if (!s || /[\d@]/.test(s) || s.length > 80) return { names: false, joined: false };
+  const parts = s.split(PARENT_JOIN).map(p => scrub(p)).filter(Boolean);
+  const wordOK = w => /^[A-ZÀ-Þ][A-Za-zÀ-ɏ'.-]*$/.test(w) || PARTICLES.has(w.toLowerCase());
+  const ok = parts.length > 0 && parts.every(p => {
+    const w = p.split(" ");
+    return w.length <= 4 && w.every(wordOK);
+  }) && parts.some(p => p.split(" ").length >= 2);
+  return { names: ok, joined: ok && parts.length >= 2 };
+}
+
+/* How strongly an email address points at one person: janedoe@ is Jane Doe,
+   cbrowncoaching@ is Chris Brown. 0 means the address gives nothing away. */
+function emailScore(name, email) {
+  const local = String(email || "").split("@")[0].toLowerCase().replace(/[^a-z]/g, "");
+  const f = key(name.first), l = key(name.last);
+  if (!local || (!f && !l)) return 0;
+  let n = 0;
+  if (f.length >= 3 && local.indexOf(f) >= 0) n += 3;
+  else if (f && l.length >= 2 && local.indexOf(f.charAt(0) + l) === 0) n += 2;
+  if (l.length >= 3 && local.indexOf(l) >= 0) n += 2;
+  return n;
+}
+
+/* Which name goes with which contact. Tries every pairing (there are never
+   more than a handful) and keeps the one the emails agree with most. When
+   the emails say nothing, or two pairings score the same, it falls back to
+   column order and says so. Returns { pick: target index per name or -1,
+   guessed }. */
+function pairNames(names, targets) {
+  const inOrder = names.map((_, i) => (i < targets.length ? i : -1));
+  if (!names.length || !targets.length || names.length > 6 || targets.length > 6)
+    return { pick: inOrder, guessed: names.length > 0 && targets.length > 1 };
+  let best = -1, bestPick = null;
+  const ties = new Set();
+  const used = targets.map(() => false), cur = [];
+  const score = pick => pick.reduce((n, t, i) => n + (t < 0 ? 0 : emailScore(names[i], targets[t].email)), 0);
+  const walk = i => {
+    if (i === names.length) {
+      if (cur.filter(t => t >= 0).length !== Math.min(names.length, targets.length)) return;
+      const sc = score(cur), k = cur.join(",");
+      if (sc > best) { best = sc; bestPick = cur.slice(); ties.clear(); ties.add(k); }
+      else if (sc === best) ties.add(k);
+      return;
+    }
+    for (let t = 0; t < targets.length; t++) {
+      if (used[t]) continue;
+      used[t] = true; cur.push(t); walk(i + 1); cur.pop(); used[t] = false;
+    }
+    cur.push(-1); walk(i + 1); cur.pop();
+  };
+  walk(0);
+  if (best <= 0 || ties.size > 1) {
+    const orderWins = ties.has(inOrder.join(","));
+    return { pick: orderWins || best <= 0 ? inOrder : bestPick,
+      guessed: names.length > 1 || targets.length > 1 };
+  }
+  return { pick: bestPick, guessed: false };
+}
+
 /* ====================================================== reading the headers
 
    School exports never use our words. Everything below turns whatever the
@@ -389,14 +578,15 @@ const F = {
   IGNORE: "ignore", FIRST: "student_first", LAST: "student_last", MIDDLE: "student_middle",
   FULL: "student_full", SUFFIX: "student_suffix", GRADE: "grade", TEACHER: "teacher",
   ID: "student_id", P_FIRST: "parent_first", P_LAST: "parent_last", P_FULL: "parent_full",
-  P_EMAIL: "parent_email", P_CELL: "parent_cell"
+  P_EMAIL: "parent_email", P_CELL: "parent_cell", GROUP_TEACHER: "group_teacher", P_NAMES: "parent_names"
 };
 const FIELD_LABEL = {
   ignore: "Not exported", student_first: "Student First Name", student_last: "Student Last Name",
   student_middle: "Student Middle Name", student_full: "Student Full Name (split it)",
   student_suffix: "Student Suffix", grade: "Grade", teacher: "Teacher", student_id: "Student ID",
   parent_first: "Parent First Name", parent_last: "Parent Last Name",
-  parent_full: "Parent Full Name (split it)", parent_email: "Parent Email", parent_cell: "Parent Cell"
+  parent_full: "Parent Full Name (split it)", parent_email: "Parent Email", parent_cell: "Parent Cell",
+  group_teacher: "Group + Teacher (split it)", parent_names: "Parent Names (split them)"
 };
 const PARENT_FIELDS = new Set([F.P_FIRST, F.P_LAST, F.P_FULL, F.P_EMAIL, F.P_CELL]);
 const fieldLabel = (field, slot) =>
@@ -435,7 +625,7 @@ const PHOTO_REL = /\b(photo|picture|media|publicity|directory|yearbook)\b.*\b(re
 function detectColumn(raw) {
   const h = headerNorm(raw);
   const out = { field: F.IGNORE, group: "", roleKind: "", prefer: null, conf: "sure",
-    note: "", questionable: false, sensitive: "", phoneKind: "" };
+    note: "", questionable: false, sensitive: "", phoneKind: "", teacherPart: "" };
   if (!h) { out.note = "unnamed column"; return out; }
 
   if (PHOTO_REL.test(h)) { out.sensitive = "photo / media release"; out.note = "photo release - not a GotPhoto field, but you may want it"; return out; }
@@ -504,7 +694,12 @@ function detectColumn(raw) {
   if (/\b(grade|level)\b/.test(h) && !/\b(reading|math|score|gpa|average|mark)\b/.test(h)) {
     out.field = F.GRADE; return out;
   }
-  if (/\b(teacher|homeroom|advisor|advisory|instructor)\b/.test(h)) { out.field = F.TEACHER; return out; }
+  if (/\b(teacher|homeroom|advisor|advisory|instructor)\b/.test(h)) {
+    out.field = F.TEACHER;
+    /* "Teacher First" + "Teacher Last" are two halves of one name. */
+    out.teacherPart = /\b(first|given)\b/.test(h) ? "first" : /\b(last|surname)\b/.test(h) ? "last" : "";
+    return out;
+  }
   if (/\b(classroom|class|section|room)\b/.test(h)) {
     out.field = F.TEACHER; out.conf = "check";
     out.note = "reading this as the teacher/classroom";
@@ -758,8 +953,35 @@ function buildColumns(sheet, headerRow, overrides) {
       mapKey: sig + "#" + index,
       field: d.field, group: d.group, prefer: d.prefer, conf: d.conf, note: d.note,
       sensitive: d.sensitive, questionable: d.questionable, phoneKind: d.phoneKind,
+      teacherPart: d.teacherPart, roleKind: d.roleKind, nameShare: 0,
       auto: d.field, autoSlot: null, slot: null, overridden: false, sample: ""
     };
+
+    /* The header alone cannot tell a "Class" column holding "First Grade -
+       Mrs. Pellham's Class" from one holding "Room 12", or a "Parent(s)"
+       column of names from one of yes/no flags, so look at what is in it. */
+    const vals = columnValues(sheet, headerRow, index);
+    const mostly = test => {
+      const n = vals.filter(test).length;
+      return vals.length >= 3 ? n / vals.length >= 0.6 : vals.length > 0 && n === vals.length;
+    };
+    const open = !d.sensitive && !d.questionable;
+    if (open && (d.field === F.TEACHER || d.field === F.GRADE || d.field === F.IGNORE) &&
+        mostly(v => { const g = splitGroupTeacher(v); return !!g && /[A-Za-z]{2}/.test(g.teacher); })) {
+      col.field = col.auto = F.GROUP_TEACHER; col.conf = "sure";
+      col.note = "grade and teacher in one column - split into Group and Teacher";
+    } else if (d.field === F.IGNORE) {
+      const looks = vals.map(looksLikeNames);
+      col.nameShare = vals.length ? looks.filter(x => x.names).length / vals.length : 0;
+      const joined = vals.length ? looks.filter(x => x.joined).length / vals.length : 0;
+      const notParents = /\b(sibling|siblings|brother|sister|student|child|kid|pupil)\b/.test(headerNorm(raw));
+      if (open && !notParents && col.nameShare >= 0.6 && (d.roleKind || joined >= 0.3)) {
+        col.field = col.auto = F.P_NAMES;
+        col.conf = /^(grandparent|step|contact)$/.test(d.roleKind) ? "check" : "sure";
+        col.note = "parents' names - split, and each paired with their own email";
+      }
+    }
+
     const ov = overrides[col.mapKey];
     if (ov !== undefined) {
       const [f, s] = String(ov).split(":");
@@ -783,6 +1005,16 @@ function buildColumns(sheet, headerRow, overrides) {
     }
   });
   return { cols, sig };
+}
+
+/* The first `limit` filled cells under the header in one column. */
+function columnValues(sheet, headerRow, index, limit) {
+  const out = [];
+  for (let r = headerRow + 1; r < sheet.grid.length && out.length < (limit || 200); r++) {
+    const v = scrub((sheet.grid[r] || [])[index]);
+    if (v) out.push(v);
+  }
+  return out;
 }
 
 function colLetter(i) {
@@ -837,14 +1069,15 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
     sheet: sheet.name, sheetIdx, row: r + 1, first: "", last: "", middle: "", suffix: "",
     grade: "", teacher: "", id: "", idNumeric: false, contacts: [], changes: [], notes: [],
     nameConf: "sure", nameNote: "", altFirst: "", rawName: "", rawGrade: "", rawTeacher: "",
-    gradeOK: true, dropped: []
+    gradeOK: true, dropped: [], legalFirst: ""
   };
   const slots = new Map();
   const getSlot = n => {
     if (!slots.has(n)) slots.set(n, { names: [], firsts: [], lasts: [], emails: [], phones: [] });
     return slots.get(n);
   };
-  let fullName = "", firstCell = "", lastCell = "";
+  let fullName = "", firstCell = "", lastCell = "", classCell = "", parentNames = "";
+  let plainTeacher = "", tFirst = "", tLast = "";
 
   cols.forEach(col => {
     const raw = cells[col.index];
@@ -858,7 +1091,13 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
       case F.SUFFIX: rec.suffix = rec.suffix || scrub(text); break;
       case F.FULL: fullName = fullName || text; break;
       case F.GRADE: if (!rec.rawGrade) rec.rawGrade = text; break;
-      case F.TEACHER: if (!rec.rawTeacher) rec.rawTeacher = text; break;
+      case F.TEACHER:
+        if (col.teacherPart === "first") tFirst = tFirst || text;
+        else if (col.teacherPart === "last") tLast = tLast || text;
+        else plainTeacher = plainTeacher || text;
+        break;
+      case F.GROUP_TEACHER: classCell = classCell || text; break;
+      case F.P_NAMES: parentNames = parentNames || String(raw); break;
       case F.ID: {
         if (!rec.id) {
           const id = normId(raw, nums[col.index]);
@@ -887,25 +1126,45 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
     }
   });
 
-  /* ---- student name ---- */
+  /* ---- student name ----
+     Bracketed notes come out of the name before anything else reads it, and
+     every one that does is written down. */
+  const noted = (gender, dropped, legalFirst, nickname) => {
+    if (gender) { ctx.stats.genderNotes++; rec.changes.push('Took "(' + gender + ')" out of the name'); }
+    (dropped || []).forEach(n => { ctx.stats.nameNotes++; rec.changes.push('Took the note "(' + n + ')" out of the name'); });
+    if (legalFirst) {
+      ctx.stats.nicknames++;
+      rec.legalFirst = legalFirst;
+      rec.changes.push("Nickname " + nickname + " used as the first name (legal first name: " + legalFirst + ")");
+    }
+  };
   rec.rawName = fullName || [firstCell, lastCell].filter(Boolean).join(" ");
   if (firstCell || lastCell) {
-    const f = fixCase(firstCell), l = fixCase(lastCell);
-    if (f !== scrub(firstCell) || l !== scrub(lastCell)) ctx.stats.namesFixed++;
+    const fn = nameNotes(firstCell), ln = nameNotes(lastCell);
+    const nick = fn.nickname || ln.nickname;
+    const f = fixCase(fn.text), l = fixCase(ln.text);
+    if (f !== fn.text || l !== ln.text) ctx.stats.namesFixed++;
     rec.first = f; rec.last = l;
     /* A single "Last, First" value dropped into a First Name column still parses. */
     if (f && !l && f.indexOf(",") >= 0) {
-      const p = splitName(firstCell);
+      const p = splitName(fn.text);
       rec.first = p.first; rec.last = p.last; rec.nameConf = p.confidence; rec.nameNote = p.note;
       rec.changes.push("Name read as Last, First");
     }
+    if (nick) {
+      const legal = rec.first;
+      rec.first = fixCase(nick);
+      noted(fn.gender || ln.gender, fn.dropped.concat(ln.dropped), legal, rec.first);
+    } else noted(fn.gender || ln.gender, fn.dropped.concat(ln.dropped));
     if (!rec.first && !rec.last && fullName) {
       const p = splitName(fullName);
       Object.assign(rec, { first: p.first, last: p.last, middle: p.middle || rec.middle,
         suffix: p.suffix || rec.suffix, nameConf: p.confidence, nameNote: p.note, altFirst: p.altFirst || "" });
+      noted(p.gender, p.droppedNotes, p.legalFirst, p.first);
     }
   } else if (fullName) {
     const p = splitName(fullName);
+    noted(p.gender, p.droppedNotes, p.legalFirst, p.first);
     rec.first = p.first; rec.last = p.last;
     rec.middle = p.middle || rec.middle;
     rec.suffix = p.suffix || rec.suffix;
@@ -917,12 +1176,32 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
     }
   }
 
+  /* ---- grade and teacher in one cell ----
+     "First Grade - Mrs. Pellham's Class". The grade half is the Group, word
+     for word; the other half is the teacher, unless a real teacher column
+     says otherwise. */
+  let group = "", classTeacher = "";
+  if (classCell) {
+    const gt = splitGroupTeacher(classCell);
+    if (gt) {
+      group = gt.group; classTeacher = gt.teacher;
+      ctx.stats.classesSplit++;
+      rec.changes.push('Split "' + classCell + '" into Group "' + gt.group + '" and a teacher');
+    } else {
+      classTeacher = classCell;
+      rec.notes.push("no grade in the class name");
+    }
+  }
+  rec.rawTeacher = plainTeacher || [tFirst, tLast].filter(Boolean).join(" ") || classTeacher;
+
   /* ---- grade ---- */
   if (rec.rawGrade) {
     const g = normGrade(rec.rawGrade);
     rec.grade = g.value; rec.gradeOK = g.ok;
     if (g.changed) { ctx.stats.gradesFixed++; rec.changes.push('Grade "' + rec.rawGrade + '" to ' + g.value); }
     if (g.note) rec.notes.push(g.note);
+  } else if (group) {
+    rec.grade = rec.rawGrade = group;
   }
 
   /* ---- teacher ---- */
@@ -930,6 +1209,13 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
     const t = normTeacher(rec.rawTeacher);
     rec.teacher = t.value;
     if (t.changed && t.value) { ctx.stats.teachersFixed++; rec.changes.push('Teacher "' + rec.rawTeacher + '" to ' + t.value); }
+    /* The tidy step must never turn a deliberate JK into Jk. If it ever does,
+       the sanity pass says so out loud. */
+    (rec.rawTeacher.match(/\b[A-Z]{2,3}\b/g) || []).forEach(w => {
+      if (TITLES[w.toLowerCase()]) return;
+      const after = t.value.split(" ").find(x => x.toUpperCase().replace(/[^A-Z]/g, "") === w && x.replace(/[^A-Za-z]/g, "") !== w);
+      if (after) ctx.capsChanged.push({ from: w, to: after.replace(/[^A-Za-z]/g, ""), field: "teacher" });
+    });
   }
 
   /* ---- contacts ----
@@ -982,6 +1268,40 @@ function readRow(sheet, sheetIdx, r, cols, ctx, headerKeys) {
       });
     }
   });
+
+  /* ---- a "Parent(s)" column of names ----
+     Each name goes to the contact whose email points at it; the Mom/Dad
+     columns themselves say nothing about which name is whose. */
+  if (parentNames) {
+    const people = splitParentNames(parentNames);
+    const open = rec.contacts.filter(c => !c.first && !c.last);
+    const paired = pairNames(people, open.map(c => ({ email: c.email || c.emailRaw })));
+    const spare = [];
+    people.forEach((p, i) => {
+      const t = paired.pick[i];
+      if (t >= 0) { open[t].first = p.first; open[t].last = p.last; }
+      else spare.push(p);
+    });
+    spare.forEach(p => {
+      const full = [p.first, p.last].filter(Boolean).join(" ");
+      if (rec.contacts.length < 2) {
+        rec.contacts.push({ slot: rec.contacts.reduce((n, c) => Math.max(n, c.slot), 0) + 1,
+          first: p.first, last: p.last, email: "", emailBad: false, emailRaw: "", emailWhy: "",
+          emailSrc: "", emailFixed: false, cell: "", cellKey: "", cellBad: false, cellRaw: "",
+          cellWhy: "", cellSrc: "", cellKind: "", cellFixed: false });
+      } else rec.dropped.push({ what: "parent name", value: full, why: "no email or phone left to pair it with" });
+    });
+    if (people.length) {
+      ctx.stats.parentNamesSplit++;
+      rec.changes.push('Parent names "' + scrub(parentNames) + '" read as ' +
+        people.map(p => [p.first, p.last].filter(Boolean).join(" ")).join(" / "));
+    }
+    if (paired.guessed && people.length && open.length) {
+      rec.parentGuess = true;
+      ctx.stats.parentsInOrder++;
+      rec.changes.push("Parent names put with the contacts in column order - the emails did not say who is who");
+    }
+  }
 
   /* The review screen can overrule an ambiguous name split. */
   const nameFix = ctx.names[sheetIdx + ":" + (r + 1)];
@@ -1062,8 +1382,19 @@ function editDistance(a, b, max) {
 }
 
 /* How alike are two student names? Never used to merge on its own -- only to
-   decide whether to ask the user about a pair. */
+   decide whether to ask the user about a pair. A child whose nickname took
+   the first name is compared under both names. */
+const LIKE_RANK = { exact: 0, nickname: 1, typo: 2, short: 3, none: 9 };
 function nameLikeness(a, b) {
+  const firsts = x => [x.first].concat(x.legalFirst ? [x.legalFirst] : []);
+  let best = { kind: "none", why: "" };
+  firsts(a).forEach(fa => firsts(b).forEach(fb => {
+    const l = likenessOf({ first: fa, last: a.last }, { first: fb, last: b.last });
+    if (LIKE_RANK[l.kind] < LIKE_RANK[best.kind]) best = l;
+  }));
+  return best;
+}
+function likenessOf(a, b) {
   const af = key(a.first), al = key(a.last), bf = key(b.first), bl = key(b.last);
   if (af === bf && al === bl) return { kind: "exact", why: "" };
   if (al !== bl) {
@@ -1088,9 +1419,12 @@ const contactNameKey = c => key(c.first) + key(c.last);
 
 function sameContact(a, b) {
   const ae = emailKeyOf(a), be = emailKeyOf(b);
-  if (ae && be) return ae === be;
-  const ap = phoneKeyOf(a), bp = phoneKeyOf(b);
   const an = contactNameKey(a), bn = contactNameKey(b);
+  /* Two differently named parents on one family email are still two people. */
+  const twoPeople = an && bn && an !== bn &&
+    nameLikeness({ first: a.first, last: a.last }, { first: b.first, last: b.last }).kind === "none";
+  if (ae && be) return ae === be && !twoPeople;
+  const ap = phoneKeyOf(a), bp = phoneKeyOf(b);
   if (ap && bp && ap === bp) return !an || !bn || an === bn ||
     nameLikeness({ first: a.first, last: a.last }, { first: b.first, last: b.last }).kind !== "none";
   if (an && bn && an === bn) return !(ae && be && ae !== be);
@@ -1230,8 +1564,11 @@ function clusterRecords(records, ctx) {
   };
   const summaries = Array.from(rootsOf().entries()).map(([root, idxs]) => {
     const r = records[idxs[0]];
-    return { root, idxs, first: r.first, last: r.last, grade: commonest(idxs.map(i => records[i].grade)),
-      teacher: commonest(idxs.map(i => records[i].teacher)), id: commonest(idxs.map(i => records[i].id)), rec: r };
+    const contacts = [].concat.apply([], idxs.map(i => records[i].contacts));
+    return { root, idxs, first: r.first, last: r.last, legalFirst: r.legalFirst,
+      grade: commonest(idxs.map(i => records[i].grade)),
+      teacher: commonest(idxs.map(i => records[i].teacher)), id: commonest(idxs.map(i => records[i].id)), rec: r,
+      reach: new Set(contacts.map(emailKeyOf).concat(contacts.map(phoneKeyOf)).filter(Boolean)) };
   });
   /* Two cheap passes instead of comparing everyone with everyone: same last
      name (catches nicknames, typos and re-spellings of the first name), and
@@ -1263,6 +1600,17 @@ function clusterRecords(records, ctx) {
       if (like.kind === "none") continue;
       const sameGrade = key(A.grade) === key(B.grade);
       if (!sameGrade && A.grade && B.grade && like.kind !== "exact") continue;
+      /* A look-alike name on its own is not evidence -- "Eli" and "Elizabeth"
+         are two children. Ask only when something else agrees: a parent
+         email or phone in common, or the same classroom. Different parent
+         emails do not count against a pair, because a split household sends
+         Mom's row and Dad's row with an address each. Identical names are
+         always asked about; they are evidence by themselves. */
+      if (like.kind !== "exact") {
+        const shared = Array.from(A.reach).some(k => B.reach.has(k));
+        const otherClass = A.teacher && B.teacher && teacherKey(A.teacher) !== teacherKey(B.teacher);
+        if (otherClass && !shared) { ctx.stats.dupSuppressed++; continue; }
+      }
 
       let title = "Possible duplicate students", why = like.why, severity = "warn", rank = 3;
       if (like.kind === "exact") {
@@ -1334,6 +1682,7 @@ function materialize(recs, ctx) {
     contacts: mergeContacts([].concat.apply([], recs.map(r => r.contacts)), ctx.stats),
     sources: [], changes: [], notes: [], dropped: [], issues: [],
     mergedRows: recs.length, nameConf: first.nameConf, nameNote: first.nameNote,
+    legalFirst: (recs.find(r => r.legalFirst) || {}).legalFirst || "", parentGuess: recs.some(r => r.parentGuess),
     altFirst: first.altFirst || "", altMiddle: first.altMiddle || "",
     nameRef: first.sheetIdx + ":" + first.row, rawName: first.rawName, gradeOK: recs.every(r => r.gradeOK),
     rawGrade: first.rawGrade, idNumeric: recs.some(r => r.idNumeric)
@@ -1368,11 +1717,13 @@ function analyze(book, opts) {
   opts = opts || {};
   const ctx = {
     decisions: opts.decisions || {}, fixes: opts.fixes || {}, names: opts.names || {},
-    junk: [], hasGrade: false, hasTeacher: false,
+    junk: [], hasGrade: false, hasTeacher: false, capsChanged: [],
     stats: { sourceRows: 0, blankRows: 0, junkRows: 0, repeatHeaders: 0, exactDupes: 0,
       mergedById: 0, mergedByName: 0, mergedByHand: 0, dupContacts: 0, namesFixed: 0, namesSplit: 0,
       gradesFixed: 0, teachersFixed: 0, emailsFixed: 0, phonesFixed: 0, splitCells: 0,
       extraContacts: 0, impliedGrade: 0, impliedTeacher: 0, moreDuplicates: 0, crowdedNames: 0,
+      classesSplit: 0, genderNotes: 0, nameNotes: 0, nicknames: 0, parentNamesSplit: 0, parentsInOrder: 0,
+      dupSuppressed: 0,
       merges: 0, formulas: 0,
       hiddenRows: 0, hiddenCols: 0, dateCells: 0, chars: { odd: 0, breaks: 0 } }
   };
@@ -1386,8 +1737,8 @@ function analyze(book, opts) {
     const built = head ? buildColumns(sh, head.row, mapping) : { cols: [], sig: "" };
     const dataRows = head ? sh.grid.slice(head.row + 1).filter(r => r.some(c => scrub(c))).length : 0;
     const implies = sheetImplies(sh.name);
-    const hasGradeCol = built.cols.some(c => c.field === F.GRADE);
-    const hasTeacherCol = built.cols.some(c => c.field === F.TEACHER);
+    const hasGradeCol = built.cols.some(c => c.field === F.GRADE || c.field === F.GROUP_TEACHER);
+    const hasTeacherCol = built.cols.some(c => c.field === F.TEACHER || c.field === F.GROUP_TEACHER);
     const info = {
       index: i, name: sh.name, headerRow: head ? head.row : -1,
       headerText: head ? (sh.grid[head.row] || []).map(c => scrub(c)).filter(Boolean).join("  |  ") : "",
@@ -1478,6 +1829,9 @@ function analyze(book, opts) {
       if (c.cell && !c.email && !c.emailBad)
         add(s, "phone-no-email", "warn", who + " has a phone but no email - GotPhoto may not import this buyer contact");
     });
+    if (s.parentGuess)
+      add(s, "parent-order", "warn", "Parent names matched to contacts in column order - check who is who: " +
+        s.contacts.map(c => [c.first, c.last].filter(Boolean).join(" ") + (c.email ? " = " + c.email : "")).join(", "));
   });
 
   /* Teacher spellings that look like one classroom written two ways. */
@@ -1503,7 +1857,7 @@ function analyze(book, opts) {
     if (!c.header && !c.sample) return;
     unused.push({ sheet: info.name, header: c.header, sample: c.sample,
       why: c.sensitive ? c.sensitive : (c.note || "not needed for GotPhoto"),
-      sensitive: !!c.sensitive, mapKey: c.mapKey });
+      sensitive: !!c.sensitive, questionable: !!c.questionable, nameShare: c.nameShare || 0, mapKey: c.mapKey });
   }));
 
   const maxParents = students.reduce((n, s) => Math.max(n, s.contacts.filter(c => c.email || c.cell || c.first || c.last).length), 0);
@@ -1526,14 +1880,81 @@ function analyze(book, opts) {
       "phone-no-email": counted("phone-no-email"), "name-parse": counted("name-parse"),
       "name-variant": counted("name-variant"), "grade-conflict": counted("grade-conflict"),
       "teacher-conflict": counted("teacher-conflict"), "id-conflict-merged": counted("id-conflict-merged"),
+      "parent-order": counted("parent-order"),
       duplicates: reviews.filter(r => r.type === "possible-duplicate" && r.choice === "separate").length,
       idConflicts: reviews.filter(r => r.type === "id-conflict").length,
       teacherVariants: teacherVariants.length
     }
   });
 
-  return { book, sheets, students, reviews, issues, unused, stats, teacherVariants,
+  const result = { book, sheets, students, reviews, issues, unused, stats, teacherVariants,
     junk: ctx.junk, rows: outputRows(students, parentSlots), columns: outputColumns(parentSlots) };
+  result.sanity = sanityChecks(result, ctx);
+  return result;
+}
+
+/* ============================================================ sanity pass
+
+   The last look before the download. Every check here is a sign that the
+   mapping or the parsing went wrong -- not a problem with the school's data
+   -- so each one is shown as a warning on screen rather than counted quietly
+   in a list nobody reads. A clean roster produces none of them. */
+
+const GENDER_WORD = /(^|[\s(])(male|female|boy|girl)($|[\s)])/i;
+
+function sanityChecks(result, ctx) {
+  const out = [];
+  const students = result.students, n = students.length;
+  const add = (id, severity, title, text) => out.push({ id, severity, title, text });
+  const eg = list => list.slice(0, 3).map(x => '"' + x + '"').join(", ") + (list.length > 3 ? " and " + (list.length - 3) + " more" : "");
+
+  /* A field that is blank for most of the roster is a mapping problem. */
+  if (n >= 10) {
+    [["first", "First name", "first name", true], ["last", "Last name", "last name", true],
+     ["grade", "Group (the grade)", "grade", true], ["teacher", "Teacher", "teacher", false]]
+      .forEach(([f, label, noun, required]) => {
+        const blank = students.filter(s => !s[f]).length;
+        if (blank / n <= 0.5) return;
+        if (!required && !ctx.hasTeacher) return;   // a roster with no teachers at all is allowed
+        add("blank-" + f, "critical", label + " is blank for " + blank + " of " + n + " students",
+          "That many blanks points to a column-mapping problem, not " + blank + " missing " + noun + "s. " +
+          "In step 2, check where the " + noun + " is: it may be inside another column (a \"Grade - " +
+          "Teacher\" class column, say) or set to Not exported.");
+      });
+  }
+
+  /* Labels: one class for a whole school means the classes were not found. */
+  const classes = labelClasses(students);
+  if (n >= 40 && classes.length === 1)
+    add("one-class", "critical", "The labels think all " + n + " students are one class",
+      "Every student landed in \"" + classes[0].title + "\". The grade and teacher are probably not " +
+      "mapped the way the roster holds them - check step 2 before printing labels.");
+
+  /* No bracket or gender word in any exported name. */
+  const odd = [];
+  students.forEach(s => {
+    const names = [s.first, s.last].concat([].concat.apply([], s.contacts.map(c => [c.first, c.last])));
+    names.forEach(v => { if (v && (/[()]/.test(v) || GENDER_WORD.test(v))) odd.push(v); });
+  });
+  if (odd.length)
+    add("odd-names", "critical", odd.length + " exported name" + (odd.length === 1 ? " holds" : "s hold") +
+      " a bracket or a gender word", "For example " + eg(odd) + ". A name field should hold only a name.");
+
+  /* People's names sitting in a column that is not going out. */
+  result.unused.filter(u => !u.sensitive && !u.questionable && u.nameShare >= 0.6).forEach(u => {
+    add("names-unused:" + u.mapKey, "critical", 'The "' + u.header + '" column holds people\'s names but is not exported',
+      (u.sample ? 'It holds values like "' + u.sample + '". ' : "") +
+      "If these are the parents, set it to Parent Names (split them) in step 2.");
+  });
+
+  /* Tidying must never have shrunk a deliberate capital abbreviation. */
+  if (ctx.capsChanged.length) {
+    const seen = Array.from(new Set(ctx.capsChanged.map(c => c.from + " became " + c.to)));
+    add("caps", "warn", "Tidying changed a short all-capitals word " + ctx.capsChanged.length + " time" +
+      (ctx.capsChanged.length === 1 ? "" : "s"), seen.slice(0, 3).join("; ") +
+      ". If that word is an abbreviation like JK, it should have stayed in capitals.");
+  }
+  return out;
 }
 
 const refOf2 = s => (s.sources[0] ? s.sources[0].sheet + ":" + s.sources[0].row : "?");
@@ -1541,7 +1962,8 @@ const refOf2 = s => (s.sources[0] ? s.sources[0].sheet + ":" + s.sources[0].row 
 /* ============================================================ the output */
 
 function outputColumns(parents) {
-  const cols = ["Student First Name", "Student Last Name", "Grade", "Teacher", "Student ID"];
+  /* "Group" is GotPhoto's own name for the grade, so it maps on import. */
+  const cols = ["Student First Name", "Student Last Name", "Group", "Teacher", "Student ID"];
   for (let i = 1; i <= parents; i++) {
     cols.push("Parent First Name " + i, "Parent Last Name " + i, "Parent Email " + i, "Parent Cell " + i);
   }
@@ -1579,7 +2001,8 @@ const ISSUE_LABEL = {
   "phone-no-email": "Phone without email", "name-parse": "Name split needs review",
   "name-variant": "Name spelled two ways", "grade-conflict": "Conflicting grade",
   "teacher-conflict": "Conflicting teacher", "id-conflict-merged": "Conflicting Student ID",
-  "possible-duplicate": "Possible duplicate students", "id-conflict": "One ID, two names"
+  "possible-duplicate": "Possible duplicate students", "id-conflict": "One ID, two names",
+  "parent-order": "Parent names paired by column order", "sanity": "Sanity check"
 };
 const SEVERITY_LABEL = { critical: "Fix before import", warn: "Check", review: "Decide" };
 
@@ -1664,7 +2087,12 @@ function reportTable(result, opts) {
   line("Names standardized", st.namesStandardized);
   line("Full names split into first/last", st.namesSplit);
   line("Grade values normalized", st.gradesFixed);
+  line("Class names split into Group + Teacher", st.classesSplit);
   line("Teacher names tidied", st.teachersFixed);
+  line("Gender notes taken out of names", st.genderNotes);
+  line("Other notes taken out of names", st.nameNotes);
+  line("Nicknames used as the first name", st.nicknames);
+  line("Parent name cells split into people", st.parentNamesSplit);
   line("Phone numbers normalized", st.phonesFixed);
   line("Email addresses cleaned", st.emailsFixed);
   line("Cells holding two contacts split", st.splitCells);
@@ -1697,7 +2125,13 @@ function reportTable(result, opts) {
   line("Names needing a split check", c["name-parse"]);
   line("Teacher spelled more than one way", c.teacherVariants);
   line("Look-alike pairs found but not listed", st.moreDuplicates);
+  line("Look-alike names not asked about (other class, no parent in common)", st.dupSuppressed);
+  line("Parent names paired by column order", c["parent-order"]);
   line("Students in name blocks too big to compare pair by pair", st.crowdedNames);
+  blank();
+  section("Sanity checks");
+  if (!(result.sanity || []).length) rows.push(["(all passed)", ""]);
+  (result.sanity || []).forEach(x => rows.push([x.title, x.text]));
   blank();
   section("Columns not exported");
   if (!result.unused.length) rows.push(["(none)", ""]);
@@ -1921,7 +2355,7 @@ function labelClasses(students) {
     g.title = classTitle(g.grade, g.teacher);
     delete g.spellings;
   });
-  out.sort((a, b) => gradeRank(a.grade) - gradeRank(b.grade) ||
+  out.sort((a, b) => gradeSortRank(a.grade) - gradeSortRank(b.grade) ||
     String(a.grade).localeCompare(String(b.grade)) ||
     String(a.teacher).localeCompare(String(b.teacher)));
   return out;
@@ -2078,6 +2512,8 @@ return {
   scrub, scrubMulti, key, looseKey, fixCase, splitName, normGrade, normTeacher, teacherKey, normId,
   cleanEmail, cleanPhone, splitEmails, splitPhones, splitNames, headerNorm, detectColumn, assignSlots,
   findHeaderRow, headerScore, parseCSV, readWorkbook, sheetImplies, buildColumns, analyze,
+  nameNotes, gradePhrase, splitGroupTeacher, splitParentNames, looksLikeNames, emailScore, pairNames,
+  sanityChecks,
   buildWorkbook, buildReadyWorkbook, outputColumns, outputFileName, readyFileName, csvFileName,
   readyTable, reviewTable, reportTable, traceTable, toCSV, toTSV, leadingZeroValues,
   nameLikeness, editDistance, mergeContacts,

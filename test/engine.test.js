@@ -155,7 +155,7 @@ RF.buildWorkbook(ExcelJS, r, { trace: true }).then(async buf => {
   eq("sheet names", names, ["GOTPHOTO READY", "NEEDS REVIEW", "CLEANUP REPORT", "SOURCE TRACE"]);
   const ready = back.getWorksheet("GOTPHOTO READY");
   eq("header row", ready.getRow(1).values.slice(1, 6),
-    ["Student First Name", "Student Last Name", "Grade", "Teacher", "Student ID"]);
+    ["Student First Name", "Student Last Name", "Group", "Teacher", "Student ID"]);
   eq("one row per student", ready.rowCount - 1, r.stats.students);
   const ids = [];
   ready.eachRow((row, n) => { if (n > 1) ids.push(row.getCell(5).value); });
@@ -184,7 +184,7 @@ async function csvOutput(r) {
   const lines = csv.split("\r\n");
 
   eq("csv header is the export header", lines[0].split(",").slice(0, 5),
-    ["Student First Name", "Student Last Name", "Grade", "Teacher", "Student ID"]);
+    ["Student First Name", "Student Last Name", "Group", "Teacher", "Student ID"]);
   eq("one line per student, plus the header", lines.length - 1, r.stats.students);
   eq("csv file name", RF.readyFileName("Oakhaven Roster.xlsx"), "Oakhaven Roster - GOTPHOTO READY.csv");
   eq("csv file name, xlsx flavour", RF.readyFileName("Oakhaven Roster.xlsx", "xlsx"),
