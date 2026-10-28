@@ -52,7 +52,7 @@ believes is the header, and what it thinks each column means:
 | School column | Exported as |
 | --- | --- |
 | StuFirst | Student First Name |
-| GradeLvl | Grade |
+| GradeLvl | Group (the grade) |
 | HR Teacher | Teacher |
 | PermID | Student ID |
 | MomEmail | Parent Email 1 |
@@ -200,8 +200,11 @@ Parent contacts are matched on the normalised email and phone, so
 | Header row | finds the real one under the school name, report title and blank rows |
 | Junk rows | blank rows, `Total Students: 427`, page numbers, repeated headers, footers |
 | Names | `Smith, Emma` → Emma / Smith; SHOUTING → Shouting; keeps `DeShawn`, `McRae`, `van der Berg`, `O'Connor`, hyphens, accents, `Jr.` |
-| Grade | `Kindergarten` `Kinder` `KG` → `K`; `01` `1st` `Grade 1` `First Grade` → `1`; PS, PK, TK, K, 1–12 |
-| Teacher | spacing and case, `Mrs` → `Mrs.`, `SMITH, JENNIFER` → `Jennifer Smith` |
+| Notes in names | `Sawyer Hale (Male)` → Sawyer / Hale, with the note logged; `Elizabeth (Tessa) Quill` → **Tessa** / Quill, because the nickname is what goes on the photo, and Elizabeth is kept in the Source Trace |
+| Grade | `Kindergarten` `Kinder` `KG` → `K`; `01` `1st` `Grade 1` `First Grade` → `1`; PS, PK, JK, TK, K, 1–12 |
+| Grade + teacher in one column | `First Grade - Mrs. Pellham's Class` → Group `First Grade` (word for word, however the school wrote it) and Teacher `Mrs. Pellham`. Picked automatically when most of a column reads that way |
+| Teacher | spacing and case, `Mrs` → `Mrs.`, `SMITH, JENNIFER` → `Jennifer Smith`, `'s Class` taken off the end, separate first/last teacher columns joined into one. `JK` stays `JK` |
+| Parent names in one column | `Jane Doe & Chris Brown`, `John and Mary Smith` → one name per parent, each put with the email that matches it (`janedoe@…` is Jane). When the emails do not say, the names go in column order and the row is flagged |
 | Student ID | always text — `0018472` stays `0018472`, never `18472` and never `1.8472E+04` |
 | Email | trims, folds case, repairs `amy @ gmail.com`, drops `none`/`N/A` |
 | Phone | `+1 (619) 555-1212 x204` → `(619) 555-1212 x204`, extensions kept |
@@ -218,6 +221,11 @@ Possible duplicate students · one ID with two names · ambiguous name splits
 teachers and IDs (when the rest of the roster has them) · rows with no parent
 contact at all.
 
+A look-alike name on its own is never enough to ask. `Eli` and `Elizabeth`
+in different classes with no parent in common are two children, so that pair
+is not asked about; the cleanup report counts how many were set aside.
+Identical names are always asked about.
+
 **Parent phone with no email** gets its own warning: GotPhoto's names-list
 import needs an email address for a buyer contact, so a phone-only parent will
 not import. No dummy addresses are ever invented.
@@ -225,6 +233,16 @@ not import. No dummy addresses are ever invented.
 Invalid emails and phones are held out of the export until they are right —
 they are on the Needs Review sheet and editable right in the review screen, so
 nothing is lost.
+
+## The sanity pass
+
+After it cleans the roster and before the download, it looks for signs that
+the *mapping* went wrong rather than the data: a required field blank for most
+of the roster (Group blank for 166 of 166 is a mapping problem, not 166 missing
+grades), one label class for a school of 40 or more, a bracket or a gender word
+in an exported name, a column of people's names marked Not exported, or a short
+capital word like `JK` that tidying changed. Each one is a red box at the top of
+step 3 and again on the download step, and it is listed in the cleanup report.
 
 ## What it leaves out
 
@@ -258,6 +276,10 @@ download always matches what you are looking at.
 npm install     # xlsx + exceljs, only needed for the tests
 npm test
 ```
+
+`test/campus.test.js` needs nothing installed (`node test/campus.test.js`). It
+runs the 1.2 parsing fixes against `test/campus-fixture.js`, a made-up roster
+in the shape of a real one. Real rosters never go in this repository.
 
 The suite builds deliberately awful workbooks — title rows, camel-case headers,
 split households, an exact duplicate, a repeated header row, a totals footer,

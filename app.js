@@ -11,6 +11,8 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const plural = (n, one, many) => n + " " + (n === 1 ? one : (many || one + "s"));
+/* "Grade 3" for a bare number; anything the school wrote in words stays as is. */
+const gradeLabel = g => (/^\d+$/.test(String(g)) ? "Grade " + g : String(g || ""));
 
 const S = {
   file: null, book: null, result: null,
@@ -76,6 +78,7 @@ function run() {
   S.result = RF.analyze(S.book, S.opts);
   renderSheets();
   renderMapping();
+  renderSanity();
   renderDash();
   renderReviews();
   renderWarnings();
@@ -131,8 +134,9 @@ const offerLine = (k, on, text) => '<div class="offer"><label class="ck"><input 
 function fieldOptions(slots) {
   const F = RF.F, L = RF.FIELD_LABEL;
   const out = [["ignore", "Not exported"]];
-  [F.FIRST, F.LAST, F.MIDDLE, F.FULL, F.SUFFIX, F.GRADE, F.TEACHER, F.ID]
+  [F.FIRST, F.LAST, F.MIDDLE, F.FULL, F.SUFFIX, F.GRADE, F.TEACHER, F.GROUP_TEACHER, F.ID]
     .forEach(f => out.push([f, L[f]]));
+  out.push([F.P_NAMES, L[F.P_NAMES]]);
   for (let s = 1; s <= slots; s++) {
     [F.P_FIRST, F.P_LAST, F.P_FULL, F.P_EMAIL, F.P_CELL].forEach(f => out.push([f + ":" + s, L[f] + " " + s]));
   }
@@ -195,6 +199,25 @@ function renderMapping() {
     plural(on.length, "tab") + " &middot; " + plural(r.unused.length, "column") + " will not be exported";
 }
 
+/* ---------------------------------------------------- 3. the sanity pass
+
+   Signs that the mapping or the parsing went wrong, as opposed to problems
+   in the school's data. They go at the top of step 3 in red, and again on
+   the download step, because a quiet "Missing grade: 166" in a list is how
+   a whole school once went to GotPhoto with no grades. */
+
+function sanityHTML(list) {
+  return list.map(x => '<div class="status-box ' + (x.severity === "critical" ? "error" : "warning") +
+    ' show sanity"><b>' + esc(x.title) + ".</b> " + esc(x.text) + "</div>").join("");
+}
+
+function renderSanity() {
+  const list = S.result.sanity || [];
+  $("sanity").innerHTML = list.length
+    ? '<h3>Before you go on: ' + plural(list.length, "thing looks", "things look") + " wrong</h3>" + sanityHTML(list)
+    : "";
+}
+
 /* ------------------------------------------------------- 3. the dashboard */
 
 function renderDash() {
@@ -205,7 +228,12 @@ function renderDash() {
     ["Duplicate parent contacts collapsed", st.dupContacts],
     ["Names standardized", st.namesStandardized],
     ["Grade values normalized", st.gradesFixed],
+    ["Class names split into Group + Teacher", st.classesSplit],
     ["Teacher names tidied", st.teachersFixed],
+    ["Gender notes taken out of names", st.genderNotes],
+    ["Other notes taken out of names", st.nameNotes],
+    ["Nicknames used as the first name", st.nicknames],
+    ["Parent name cells split into people", st.parentNamesSplit],
     ["Phone numbers normalized", st.phonesFixed],
     ["Email addresses cleaned", st.emailsFixed],
     ["Cells holding two contacts split", st.splitCells],
@@ -234,6 +262,7 @@ function renderDash() {
     ["Missing Student ID", c["missing-id"], "w-missing-id"],
     ["No parent contact at all", c["no-contact"], "w-no-contact"],
     ["Parent phone without email", c["phone-no-email"], "w-phone-no-email"],
+    ["Parent names paired by column order", c["parent-order"], "w-parent-order"],
     ["Same student spelled two ways", c["name-variant"], "w-name-variant"],
     ["Conflicting grade after merge", c["grade-conflict"], "w-grade-conflict"],
     ["Conflicting teacher after merge", c["teacher-conflict"], "w-teacher-conflict"],
@@ -283,7 +312,8 @@ function renderDash() {
 
 function cardHTML(c) {
   return '<div class="pc"><div class="pn">' + esc(c.name) + "</div>" +
-    '<div class="pl">Grade ' + esc(c.grade) + " &middot; " + esc(c.teacher) + " &middot; ID: " + esc(c.id) + "</div>" +
+    '<div class="pl">' + esc(c.grade === "-" ? "No grade" : gradeLabel(c.grade)) + " &middot; " + esc(c.teacher) +
+      " &middot; ID: " + esc(c.id) + "</div>" +
     (c.contacts.length ? c.contacts.map(x => '<div class="pe">' + esc(x) + "</div>").join("")
       : '<div class="pe" style="color:#6B7A87">no parent contact</div>') +
     '<div class="pl">' + esc(c.where.map(w => "row " + w.split(":")[1]).join(", ")) + "</div></div>";
@@ -329,17 +359,21 @@ function renderReviews() {
 
   const names = r.issues.filter(i => i.type === "name-parse");
   if (names.length) {
-    html.push("<h3>Which part is the last name?</h3>");
-    html.push('<div class="sub">Multi-word names can go either way. The last name is right either ' +
-      "way &mdash; this is only about how much of it is the first name.</div>");
+    html.push("<h3>Which part is the first name?</h3>");
+    /* Both buttons share one last name, so promise that only when it is
+       plainly a surname -- never when it is a bracket or a gender word. */
+    const lastSure = names.every(i => i.student.last && !/[()]/.test(i.student.last) &&
+      !/^(male|female|boy|girl)$/i.test(i.student.last));
+    html.push('<div class="sub">Multi-word names can go either way. ' + (lastSure
+      ? "The last name is right either way &mdash; this is only about how much of it is the first name."
+      : "Check the last name too: at least one of these does not look like a surname.") + "</div>");
     names.forEach(i => {
       const s = i.student;
       const a = { first: s.first, last: s.last }, b = { first: i.alt, last: s.last };
       const chosen = S.opts.names[i.nameKey];
       html.push('<div class="rev' + (chosen ? " settled" : "") + '">' +
         '<div class="rt">' + esc(i.raw) + "</div>" +
-        '<div class="rd">' + esc(s.grade ? "Grade " + s.grade : "") +
-          (s.teacher ? " &middot; " + esc(s.teacher) : "") + "</div>" +
+        '<div class="rd">' + [gradeLabel(s.grade), s.teacher].filter(Boolean).map(esc).join(" &middot; ") + "</div>" +
         '<div class="opts" style="margin-top:9px">' +
         [a, b].filter(x => x.first).map(x =>
           '<button class="opt' + (chosen ? (chosenName(i.nameKey, x) ? " on" : "")
@@ -413,21 +447,25 @@ const WARN_TITLE = {
   "missing-id": "Missing Student ID", "no-contact": "No parent contact at all",
   "phone-no-email": "Parent phone with no email", "name-variant": "Spelled two ways",
   "grade-conflict": "Merged rows disagree on grade", "teacher-conflict": "Merged rows disagree on teacher",
-  "id-conflict-merged": "Merged rows carry different Student IDs"
+  "id-conflict-merged": "Merged rows carry different Student IDs",
+  "parent-order": "Parent names paired by column order"
 };
 const WARN_NOTE = {
   "phone-no-email": "GotPhoto's names-list import needs an email for a buyer contact. A phone-only " +
     "parent will not come through. No fake addresses were invented.",
   "missing-teacher": "Most of this roster has a teacher, so these stand out.",
   "missing-id": "Most of this roster has a Student ID, so these stand out.",
-  "odd-grade": "Left exactly as the school wrote it - never turned into a made-up grade number."
+  "odd-grade": "Left exactly as the school wrote it - never turned into a made-up grade number.",
+  "parent-order": "The parent names cell lists more than one person and the email addresses do not say " +
+    "which name is whose, so the first name went with Parent 1 (Mom) and the next with Parent 2. Check these " +
+    "in the download before sending."
 };
 
 function renderWarnings() {
   const r = S.result;
   const order = ["no-name", "missing-last", "missing-first", "no-contact", "id-conflict-merged",
     "name-variant", "grade-conflict", "teacher-conflict", "odd-grade", "missing-grade",
-    "missing-teacher", "missing-id", "phone-no-email"];
+    "missing-teacher", "missing-id", "phone-no-email", "parent-order"];
   const html = [];
   order.forEach(type => {
     const list = r.issues.filter(i => i.type === type);
@@ -478,7 +516,7 @@ function renderDownload() {
   const left = st.counts.duplicates + st.counts.idConflicts + st.counts["bad-email"] + st.counts["bad-phone"];
   const zeros = RF.leadingZeroValues(RF.readyTable(r));
 
-  $("dlinfo").innerHTML =
+  $("dlinfo").innerHTML = sanityHTML(r.sanity || []) +
     (left ? '<div class="status-box warning show"><b>' + plural(left, "thing") +
       " still waiting on you</b> in step 3. You can download anyway &mdash; unresolved rows stay " +
       "separate and are listed under Needs Review.</div>" : "") +
@@ -743,9 +781,10 @@ function renderSidebar() {
     row("Exact dupes gone", st.exactDupes, st.exactDupes ? "good" : "") +
     row("Needs you", needs, needs ? "warn" : "good") +
     row("Not exported", S.result.unused.length);
-  $("sb-note").innerHTML = needs
-    ? "Step 3 has " + plural(needs, "decision") + " waiting. Nothing was merged without asking."
-    : "Everything resolved. The download is ready whenever you are.";
+  const sanity = (S.result.sanity || []).length;
+  $("sb-note").innerHTML = (sanity ? "<b>" + plural(sanity, "sanity warning") + "</b> at the top of step 3. " : "") +
+    (needs ? "Step 3 has " + plural(needs, "decision") + " waiting. Nothing was merged without asking."
+      : sanity ? "" : "Everything resolved. The download is ready whenever you are.");
 }
 const row = (l, v, cls) => '<div class="srow ' + (cls || "") + '"><span class="l">' + l + "</span><b>" + v + "</b></div>";
 

@@ -1,10 +1,10 @@
 {
   "name": "school-photo-roster-fixer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Turn a school's messy roster spreadsheet into one clean row per student for GotPhoto",
   "private": true,
   "scripts": {
-    "test": "node test/engine.test.js"
+    "test": "node test/engine.test.js && node test/campus.test.js"
   },
   "devDependencies": {
     "exceljs": "^4.4.0",
